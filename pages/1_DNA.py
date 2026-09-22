@@ -187,3 +187,6 @@ if st.button("DNA 분석하기", type="primary"):
                     st.info(
                         f"'{target}' 서열을 찾지 못했습니다."
                     )
+
+if st.button("← 홈으로"):
+    st.switch_page("main.py")
