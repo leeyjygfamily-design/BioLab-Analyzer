@@ -195,3 +195,6 @@ if st.button(
             st.code(
                 f"y = {slope:.4f}x + {intercept:.4f}"
             )
+
+if st.button("← 홈으로"):
+    st.switch_page("main.py")
