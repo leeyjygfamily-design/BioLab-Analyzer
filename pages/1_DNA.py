@@ -154,6 +154,165 @@ def compare_sequences(sequence1, sequence2):
 
     return differences
 
+# --------------------------------------------------
+# ORF 및 아미노산 분석
+# --------------------------------------------------
+
+# DNA 코돈을 아미노산으로 변환하기 위한 표입니다.
+codon_table = {
+    "TTT": "F", "TTC": "F",
+    "TTA": "L", "TTG": "L",
+
+    "TCT": "S", "TCC": "S",
+    "TCA": "S", "TCG": "S",
+    "TAT": "Y", "TAC": "Y",
+    "TAA": "*", "TAG": "*",
+
+    "TGT": "C", "TGC": "C",
+    "TGA": "*", "TGG": "W",
+
+    "CTT": "L", "CTC": "L",
+    "CTA": "L", "CTG": "L",
+
+    "CCT": "P", "CCC": "P",
+    "CCA": "P", "CCG": "P",
+
+    "CAT": "H", "CAC": "H",
+    "CAA": "Q", "CAG": "Q",
+
+    "CGT": "R", "CGC": "R",
+    "CGA": "R", "CGG": "R",
+
+    "ATT": "I", "ATC": "I",
+    "ATA": "I", "ATG": "M",
+
+    "ACT": "T", "ACC": "T",
+    "ACA": "T", "ACG": "T",
+
+    "AAT": "N", "AAC": "N",
+    "AAA": "K", "AAG": "K",
+
+    "AGT": "S", "AGC": "S",
+    "AGA": "R", "AGG": "R",
+
+    "GTT": "V", "GTC": "V",
+    "GTA": "V", "GTG": "V",
+
+    "GCT": "A", "GCC": "A",
+    "GCA": "A", "GCG": "A",
+
+    "GAT": "D", "GAC": "D",
+    "GAA": "E", "GAG": "E",
+
+    "GGT": "G", "GGC": "G",
+    "GGA": "G", "GGG": "G"
+}
+
+
+# 아미노산 한 글자를 이름으로 바꾸기 위한 표입니다.
+amino_acid_names = {
+    "A": "Alanine",
+    "R": "Arginine",
+    "N": "Asparagine",
+    "D": "Aspartic acid",
+    "C": "Cysteine",
+    "E": "Glutamic acid",
+    "Q": "Glutamine",
+    "G": "Glycine",
+    "H": "Histidine",
+    "I": "Isoleucine",
+    "L": "Leucine",
+    "K": "Lysine",
+    "M": "Methionine",
+    "F": "Phenylalanine",
+    "P": "Proline",
+    "S": "Serine",
+    "T": "Threonine",
+    "W": "Tryptophan",
+    "Y": "Tyrosine",
+    "V": "Valine"
+}
+
+
+def find_orfs(sequence):
+    """
+    DNA 서열의 3가지 reading frame에서
+    시작 코돈 ATG부터 종결 코돈까지 ORF를 찾습니다.
+    """
+
+    orfs = []
+
+    stop_codons = {"TAA", "TAG", "TGA"}
+
+    # DNA를 읽기 시작하는 위치를 0, 1, 2로 바꿔봅니다.
+    for frame in range(3):
+
+        i = frame
+
+        while i <= len(sequence) - 3:
+
+            codon = sequence[i:i + 3]
+
+            # 시작 코돈을 발견하면 ORF 탐색을 시작합니다.
+            if codon == "ATG":
+
+                start = i
+                j = i + 3
+
+                while j <= len(sequence) - 3:
+
+                    current_codon = sequence[j:j + 3]
+
+                    # 종결 코돈을 찾으면 ORF를 완성합니다.
+                    if current_codon in stop_codons:
+
+                        end = j + 3
+
+                        dna_sequence = sequence[start:end]
+
+                        amino_sequence = translate_dna(
+                            dna_sequence
+                        )
+
+                        orfs.append({
+                            "reading_frame": frame + 1,
+                            "start": start + 1,
+                            "end": end,
+                            "length": end - start,
+                            "dna": dna_sequence,
+                            "protein": amino_sequence
+                        })
+
+                        break
+
+                    j += 3
+
+                # 다음 ATG를 찾기 위해 계속 이동합니다.
+
+            i += 3
+
+    return orfs
+
+
+def translate_dna(sequence):
+    """
+    DNA 서열을 3개씩 읽어서 아미노산 서열로 변환합니다.
+    """
+
+    protein = []
+
+    for i in range(0, len(sequence) - 2, 3):
+
+        codon = sequence[i:i + 3]
+
+        amino_acid = codon_table.get(
+            codon,
+            "?"
+        )
+
+        protein.append(amino_acid)
+
+    return "".join(protein)
 
 # --------------------------------------------------
 # NCBI 검색 함수
@@ -731,4 +890,208 @@ if st.button(
             st.info(
                 "검색할 염기서열을 입력하면 "
                 "해당 서열의 위치를 찾을 수 있습니다."
+            )
+# --------------------------------------------------
+# ORF 분석
+# --------------------------------------------------
+
+st.divider()
+
+st.subheader("🧬 ORF 및 아미노산 분석")
+
+st.write(
+    "DNA 서열에서 시작 코돈(ATG)부터 "
+    "종결 코돈(TAA, TAG, TGA)까지의 "
+    "ORF를 탐색하고 아미노산 서열로 변환합니다."
+)
+
+if st.button(
+    "ORF 찾기",
+    use_container_width=True
+):
+
+    orfs = find_orfs(sequence)
+
+    if not orfs:
+
+        st.warning(
+            "입력된 DNA 서열에서 "
+            "완전한 ORF를 찾지 못했습니다."
+        )
+
+    else:
+
+        st.success(
+            f"{len(orfs)}개의 ORF를 찾았습니다."
+        )
+
+        orf_data = []
+
+        for index, orf in enumerate(orfs):
+
+            orf_data.append({
+                "ORF": f"ORF {index + 1}",
+                "Reading frame": orf["reading_frame"],
+                "시작 위치": orf["start"],
+                "종료 위치": orf["end"],
+                "DNA 길이": orf["length"],
+                "아미노산 길이": len(
+                    orf["protein"]
+                ) - 1
+            })
+
+        orf_df = pd.DataFrame(
+            orf_data
+        )
+
+        st.dataframe(
+            orf_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ORF 하나를 선택합니다.
+        selected_orf_number = st.selectbox(
+            "자세히 볼 ORF를 선택하세요.",
+            range(
+                1,
+                len(orfs) + 1
+            )
+        )
+
+        selected_orf = orfs[
+            selected_orf_number - 1
+        ]
+
+        st.subheader(
+            f"ORF {selected_orf_number} 상세 정보"
+        )
+
+        st.write(
+            f"Reading frame: "
+            f"{selected_orf['reading_frame']}"
+        )
+
+        st.write(
+            f"DNA 위치: "
+            f"{selected_orf['start']} ~ "
+            f"{selected_orf['end']}"
+        )
+
+        st.write(
+            f"DNA 길이: "
+            f"{selected_orf['length']} bp"
+        )
+
+        st.write("DNA 서열")
+
+        st.code(
+            selected_orf["dna"]
+        )
+
+        st.write("번역된 아미노산 서열")
+
+        st.code(
+            selected_orf["protein"]
+        )
+
+
+        # --------------------------------------------------
+        # 아미노산 검색
+        # --------------------------------------------------
+
+        st.subheader(
+            "🔎 특정 아미노산 검색"
+        )
+
+        amino_options = {
+            f"{name} ({code})": code
+            for code, name
+            in amino_acid_names.items()
+        }
+
+        selected_amino_name = st.selectbox(
+            "검색할 아미노산을 선택하세요.",
+            list(amino_options.keys())
+        )
+
+        selected_amino = amino_options[
+            selected_amino_name
+        ]
+
+        protein_sequence = (
+            selected_orf["protein"]
+        )
+
+        amino_positions = []
+
+        for index, amino in enumerate(
+            protein_sequence
+        ):
+
+            # 종결 코돈은 아미노산 검색에서 제외합니다.
+            if amino == selected_amino:
+
+                amino_positions.append(
+                    index + 1
+                )
+
+        if amino_positions:
+
+            st.success(
+                f"{selected_amino_name}이 "
+                f"{len(amino_positions)}개 발견되었습니다."
+            )
+
+            st.write(
+                "아미노산 위치:",
+                ", ".join(
+                    map(
+                        str,
+                        amino_positions
+                    )
+                )
+            )
+
+            # 해당 아미노산의 DNA 코돈도 보여줍니다.
+            codon_results = []
+
+            for position in amino_positions:
+
+                dna_index = (
+                    (position - 1) * 3
+                )
+
+                codon = selected_orf[
+                    "dna"
+                ][
+                    dna_index:dna_index + 3
+                ]
+
+                codon_results.append({
+                    "아미노산 위치": position,
+                    "아미노산": selected_amino,
+                    "DNA 코돈": codon,
+                    "DNA 위치": (
+                        selected_orf["start"]
+                        + dna_index
+                    )
+                })
+
+            amino_df = pd.DataFrame(
+                codon_results
+            )
+
+            st.dataframe(
+                amino_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        else:
+
+            st.info(
+                f"선택한 ORF에서 "
+                f"{selected_amino_name}을 "
+                "찾지 못했습니다."
             )
