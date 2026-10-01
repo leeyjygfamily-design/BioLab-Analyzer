@@ -433,6 +433,9 @@ if "ncbi_results" in st.session_state:
 
                 st.session_state.sequence = sequence
 
+                # 새로운 DNA를 가져오면 이전 ORF 분석 결과를 초기화합니다.
+                st.session_state.pop("orfs", None)
+
                 st.success(
                     "DNA 서열을 가져왔습니다."
                 )
@@ -502,132 +505,171 @@ if "sequence" in st.session_state:
 # ③ ORF 및 아미노산 분석
 # ==================================================
 
-    st.divider()
+st.divider()
 
-    st.subheader(
-        "③ ORF 및 아미노산 분석"
-    )
+st.subheader(
+    "③ ORF 및 아미노산 분석"
+)
 
-    st.write(
-        "DNA에서 시작 코돈 ATG부터 "
-        "종결 코돈까지 이어지는 ORF를 찾고, "
-        "이를 아미노산 서열로 변환합니다."
-    )
+st.write(
+    "DNA에서 시작 코돈 ATG부터 "
+    "종결 코돈까지 이어지는 ORF를 찾고, "
+    "이를 아미노산 서열로 변환합니다."
+)
 
-    if st.button(
-        "ORF 분석하기",
-        type="primary",
-        use_container_width=True
-    ):
 
-        orfs = find_orfs(
-            sequence
+# --------------------------------------------------
+# ORF 분석 버튼
+# --------------------------------------------------
+
+if st.button(
+    "ORF 분석하기",
+    type="primary",
+    use_container_width=True
+):
+
+    # ORF 분석 결과를 저장합니다.
+    orfs = find_orfs(sequence)
+
+    st.session_state.orfs = orfs
+
+
+# --------------------------------------------------
+# ORF 분석 결과
+# --------------------------------------------------
+
+# 버튼을 다시 누르지 않아도 저장된 결과를 보여줍니다.
+if "orfs" in st.session_state:
+
+    orfs = st.session_state.orfs
+
+    if not orfs:
+
+        st.warning(
+            "완전한 ORF를 찾지 못했습니다."
         )
 
-        if not orfs:
+    else:
 
-            st.warning(
-                "완전한 ORF를 찾지 못했습니다."
+        st.success(
+            f"{len(orfs)}개의 ORF를 찾았습니다."
+        )
+
+
+        # ------------------------------------------
+        # ORF 선택
+        # ------------------------------------------
+
+        orf_options = {
+            f"ORF {i + 1} | "
+            f"Frame {orf['frame']} | "
+            f"{orf['start']}–{orf['end']}": i
+            for i, orf in enumerate(orfs)
+        }
+
+        selected_orf_label = st.selectbox(
+            "분석할 ORF를 선택하세요.",
+            list(orf_options.keys())
+        )
+
+        selected_index = orf_options[
+            selected_orf_label
+        ]
+
+        selected_orf = orfs[
+            selected_index
+        ]
+
+
+        # ------------------------------------------
+        # 선택한 ORF 기본 정보
+        # ------------------------------------------
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.metric(
+                "ORF 길이",
+                f"{len(selected_orf['dna'])} bp"
+            )
+
+        with col2:
+
+            st.metric(
+                "아미노산 길이",
+                f"{len(selected_orf['protein']) - 1} aa"
+            )
+
+
+        # ------------------------------------------
+        # 아미노산 서열
+        # ------------------------------------------
+
+        st.write(
+            "번역된 아미노산 서열"
+        )
+
+        st.code(
+            selected_orf["protein"]
+        )
+
+
+        # ------------------------------------------
+        # 특정 아미노산 검색
+        # ------------------------------------------
+
+        st.write(
+            "아미노산 서열에서 원하는 아미노산을 찾습니다."
+        )
+
+        amino_options = {
+            f"{name} ({code})": code
+            for code, name
+            in amino_acid_names.items()
+        }
+
+        selected_amino_name = st.selectbox(
+            "검색할 아미노산",
+            list(amino_options.keys())
+        )
+
+        selected_amino = amino_options[
+            selected_amino_name
+        ]
+
+
+        # ------------------------------------------
+        # 아미노산 위치 검색
+        # ------------------------------------------
+
+        protein = selected_orf[
+            "protein"
+        ]
+
+        positions = [
+            i + 1
+            for i, amino in enumerate(protein)
+            if amino == selected_amino
+        ]
+
+
+        if positions:
+
+            st.success(
+                f"{selected_amino_name} "
+                f"{len(positions)}개 발견"
+            )
+
+            st.write(
+                "아미노산 위치:",
+                ", ".join(
+                    map(str, positions)
+                )
             )
 
         else:
 
-            st.success(
-                f"{len(orfs)}개의 ORF를 찾았습니다."
+            st.info(
+                "해당 아미노산을 찾지 못했습니다."
             )
-
-            # ORF 목록을 간단하게 보여줍니다.
-            orf_options = {
-                f"ORF {i + 1} | "
-                f"Frame {orf['frame']} | "
-                f"{orf['start']}–{orf['end']}": i
-                for i, orf in enumerate(orfs)
-            }
-
-            selected_orf_label = st.selectbox(
-                "분석할 ORF를 선택하세요.",
-                list(orf_options.keys())
-            )
-
-            selected_index = orf_options[
-                selected_orf_label
-            ]
-
-            selected_orf = orfs[
-                selected_index
-            ]
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.metric(
-                    "ORF 길이",
-                    f"{len(selected_orf['dna'])} bp"
-                )
-
-            with col2:
-
-                st.metric(
-                    "아미노산 길이",
-                    f"{len(selected_orf['protein']) - 1} aa"
-                )
-
-            st.write("번역된 아미노산 서열")
-
-            st.code(
-                selected_orf["protein"]
-            )
-
-            # ------------------------------------------
-            # 특정 아미노산 검색
-            # ------------------------------------------
-
-            st.write(
-                "아미노산 서열에서 원하는 아미노산을 찾습니다."
-            )
-
-            amino_options = {
-                f"{name} ({code})": code
-                for code, name
-                in amino_acid_names.items()
-            }
-
-            selected_amino_name = st.selectbox(
-                "검색할 아미노산",
-                list(amino_options.keys())
-            )
-
-            selected_amino = amino_options[
-                selected_amino_name
-            ]
-
-            protein = selected_orf[
-                "protein"
-            ]
-
-            positions = [
-                i + 1
-                for i, amino in enumerate(protein)
-                if amino == selected_amino
-            ]
-
-            if positions:
-
-                st.success(
-                    f"{selected_amino_name} "
-                    f"{len(positions)}개 발견"
-                )
-
-                st.write(
-                    "아미노산 위치:",
-                    ", ".join(
-                        map(str, positions)
-                    )
-                )
-
-            else:
-
-                st.info(
-                    "해당 아미노산을 찾지 못했습니다."
-                )
