@@ -673,3 +673,232 @@ if "orfs" in st.session_state:
             st.info(
                 "해당 아미노산을 찾지 못했습니다."
             )
+
+
+# ==================================================
+# ④ DNA 변이 분석
+# ==================================================
+
+st.divider()
+
+st.subheader("④ DNA 변이 분석")
+
+st.write(
+    "기준 DNA 서열과 비교 서열을 비교하여 "
+    "염기가 달라진 위치를 찾습니다."
+)
+
+
+# --------------------------------------------------
+# 비교할 DNA 서열 입력
+# --------------------------------------------------
+
+reference_sequence = sequence
+
+st.write("기준 DNA 서열")
+
+st.code(
+    reference_sequence[:500]
+    + ("..." if len(reference_sequence) > 500 else "")
+)
+
+sample_sequence = st.text_area(
+    "비교할 DNA 서열",
+    placeholder="비교할 DNA 서열을 입력하세요.",
+    height=120
+)
+
+
+# --------------------------------------------------
+# 변이 분석 함수
+# --------------------------------------------------
+
+def find_variants(reference, sample):
+    """두 DNA 서열의 서로 다른 위치를 찾습니다."""
+
+    variants = []
+
+    # 같은 길이인 경우를 기본 분석 대상으로 합니다.
+    if len(reference) != len(sample):
+        return None
+
+    for i in range(len(reference)):
+
+        ref_base = reference[i]
+        sample_base = sample[i]
+
+        if ref_base != sample_base:
+
+            variants.append({
+                "위치": i + 1,
+                "기준 염기": ref_base,
+                "비교 염기": sample_base
+            })
+
+    return variants
+
+
+# --------------------------------------------------
+# 변이 분석 버튼
+# --------------------------------------------------
+
+if st.button(
+    "변이 분석하기",
+    type="primary",
+    use_container_width=True
+):
+
+    clean_sample = (
+        sample_sequence
+        .upper()
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("\r", "")
+    )
+
+    # 입력 여부 확인
+    if not clean_sample:
+
+        st.warning(
+            "비교할 DNA 서열을 입력해주세요."
+        )
+
+    # DNA 문자 확인
+    elif set(clean_sample) - set("ATGC"):
+
+        st.error(
+            "DNA 서열에는 A, T, G, C만 사용할 수 있습니다."
+        )
+
+    # 길이 확인
+    elif len(reference_sequence) != len(clean_sample):
+
+        st.warning(
+            "현재 변이 분석은 동일한 길이의 "
+            "DNA 서열을 비교합니다."
+        )
+
+        st.write(
+            f"기준 서열: {len(reference_sequence):,} bp"
+        )
+
+        st.write(
+            f"비교 서열: {len(clean_sample):,} bp"
+        )
+
+    else:
+
+        variants = find_variants(
+            reference_sequence,
+            clean_sample
+        )
+
+        # 결과를 저장합니다.
+        st.session_state.variant_results = variants
+        st.session_state.variant_sample = clean_sample
+
+
+# --------------------------------------------------
+# 변이 분석 결과
+# --------------------------------------------------
+
+if "variant_results" in st.session_state:
+
+    variants = st.session_state.variant_results
+
+    st.divider()
+
+    if not variants:
+
+        st.success(
+            "두 DNA 서열이 완전히 일치합니다."
+        )
+
+    else:
+
+        st.success(
+            f"총 {len(variants)}개의 염기 변이를 발견했습니다."
+        )
+
+        variant_df = pd.DataFrame(
+            variants
+        )
+
+        st.dataframe(
+            variant_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ------------------------------------------
+        # 염기 변이 유형
+        # ------------------------------------------
+
+        st.subheader("변이 유형")
+
+        transition_count = 0
+        transversion_count = 0
+
+        transitions = {
+            ("A", "G"),
+            ("G", "A"),
+            ("C", "T"),
+            ("T", "C")
+        }
+
+        for variant in variants:
+
+            pair = (
+                variant["기준 염기"],
+                variant["비교 염기"]
+            )
+
+            if pair in transitions:
+                transition_count += 1
+            else:
+                transversion_count += 1
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.metric(
+                "Transition",
+                transition_count
+            )
+
+        with col2:
+
+            st.metric(
+                "Transversion",
+                transversion_count
+            )
+
+
+        # ------------------------------------------
+        # 변이 위치 시각화
+        # ------------------------------------------
+
+        variant_plot = pd.DataFrame({
+            "위치": [
+                item["위치"]
+                for item in variants
+            ],
+            "변이": [
+                f"{item['기준 염기']} → "
+                f"{item['비교 염기']}"
+                for item in variants
+            ]
+        })
+
+        fig = px.scatter(
+            variant_plot,
+            x="위치",
+            y="변이",
+            title="DNA 변이 위치"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
