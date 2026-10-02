@@ -675,57 +675,128 @@ if "orfs" in st.session_state:
             )
 
 
-# ==================================================
+# ============================================================
 # ④ DNA 변이 분석
-# ==================================================
+# ============================================================
 
 st.divider()
-
-st.subheader("④ DNA 변이 분석")
+st.header("④ DNA 변이 분석")
 
 st.write(
-    "기준 DNA 서열과 비교 서열을 비교하여 "
-    "염기가 달라진 위치를 찾습니다."
+    "기준 DNA와 비교 DNA의 염기서열을 비교하거나, "
+    "ClinVar에서 알려진 유전자 변이를 검색할 수 있습니다."
 )
 
 
-# --------------------------------------------------
-# 비교할 DNA 서열 입력
-# --------------------------------------------------
+# ------------------------------------------------------------
+# NCBI Nuccore 검색
+# ------------------------------------------------------------
+def search_nuccore(query, retmax=10):
 
-reference_sequence = sequence
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 
-st.write("기준 DNA 서열")
+    params = {
+        "db": "nuccore",
+        "term": query,
+        "retmode": "json",
+        "retmax": retmax,
+        "api_key": NCBI_API_KEY,
+        "email": NCBI_EMAIL
+    }
 
-st.code(
-    reference_sequence[:500]
-    + ("..." if len(reference_sequence) > 500 else "")
-)
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
 
-sample_sequence = st.text_area(
-    "비교할 DNA 서열",
-    placeholder="비교할 DNA 서열을 입력하세요.",
-    height=120
-)
+    data = response.json()
+
+    ids = data["esearchresult"]["idlist"]
+    count = int(data["esearchresult"]["count"])
+
+    return ids, count
 
 
-# --------------------------------------------------
-# 변이 분석 함수
-# --------------------------------------------------
+# ------------------------------------------------------------
+# NCBI 서열 정보 가져오기
+# ------------------------------------------------------------
+def get_nuccore_summaries(ids):
 
+    if not ids:
+        return []
+
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+
+    params = {
+        "db": "nuccore",
+        "id": ",".join(ids),
+        "retmode": "json",
+        "api_key": NCBI_API_KEY,
+        "email": NCBI_EMAIL
+    }
+
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
+
+    data = response.json()
+
+    results = []
+
+    for uid in ids:
+
+        info = data["result"].get(uid, {})
+
+        results.append({
+            "uid": uid,
+            "title": info.get("title", "제목 없음"),
+            "accession": info.get("accessionversion", ""),
+            "length": info.get("slen", 0)
+        })
+
+    return results
+
+
+# ------------------------------------------------------------
+# NCBI에서 실제 DNA 서열 가져오기
+# ------------------------------------------------------------
+def fetch_nuccore_sequence(uid):
+
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+
+    params = {
+        "db": "nuccore",
+        "id": uid,
+        "rettype": "fasta",
+        "retmode": "text",
+        "api_key": NCBI_API_KEY,
+        "email": NCBI_EMAIL
+    }
+
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
+
+    fasta = response.text
+
+    # FASTA 첫 줄(>로 시작하는 설명)을 제외하고
+    # 실제 DNA 염기서열만 합침
+    sequence = "".join(
+        line.strip()
+        for line in fasta.splitlines()
+        if not line.startswith(">")
+    )
+
+    return sequence.upper()
+
+
+# ------------------------------------------------------------
+# 두 DNA 서열의 변이 탐색
+# ------------------------------------------------------------
 def find_variants(reference, sample):
-    """두 DNA 서열의 서로 다른 위치를 찾습니다."""
 
-    variants = []
-
-    # 같은 길이인 경우를 기본 분석 대상으로 합니다.
     if len(reference) != len(sample):
         return None
 
-    for i in range(len(reference)):
+    variants = []
 
-        ref_base = reference[i]
-        sample_base = sample[i]
+    for i, (ref_base, sample_base) in enumerate(zip(reference, sample)):
 
         if ref_base != sample_base:
 
@@ -738,90 +809,535 @@ def find_variants(reference, sample):
     return variants
 
 
-# --------------------------------------------------
-# 변이 분석 버튼
-# --------------------------------------------------
+# ------------------------------------------------------------
+# Transition / Transversion 구분
+# ------------------------------------------------------------
+def classify_substitution(ref, alt):
 
-if st.button(
-    "변이 분석하기",
-    type="primary",
-    use_container_width=True
-):
+    transition_pairs = {
+        ("A", "G"),
+        ("G", "A"),
+        ("C", "T"),
+        ("T", "C")
+    }
 
-    clean_sample = (
-        sample_sequence
-        .upper()
-        .replace(" ", "")
-        .replace("\n", "")
-        .replace("\r", "")
+    if (ref, alt) in transition_pairs:
+        return "Transition"
+
+    return "Transversion"
+
+
+# ------------------------------------------------------------
+# 변이가 코돈과 아미노산에 미치는 영향 분석
+# ------------------------------------------------------------
+def analyze_codon_change(reference, sample, position):
+
+    # position은 1부터 시작하므로 Python index로 변환
+    index = position - 1
+
+    codon_start = (index // 3) * 3
+
+    ref_codon = reference[codon_start:codon_start + 3]
+    alt_codon = sample[codon_start:codon_start + 3]
+
+    # 마지막에 불완전한 코돈이 있으면 분석하지 않음
+    if len(ref_codon) != 3 or len(alt_codon) != 3:
+        return None
+
+    ref_aa = CODON_TABLE.get(ref_codon, "?")
+    alt_aa = CODON_TABLE.get(alt_codon, "?")
+
+    # 변이 종류 분류
+    if ref_aa == alt_aa:
+        effect = "동의적 변이 (Synonymous)"
+
+    elif alt_aa == "*":
+        effect = "종결 코돈 생성 (Nonsense)"
+
+    else:
+        effect = "아미노산 변화 (Missense)"
+
+    return {
+        "기준 코돈": ref_codon,
+        "변이 코돈": alt_codon,
+        "기준 아미노산": ref_aa,
+        "변이 아미노산": alt_aa,
+        "영향": effect
+    }
+
+
+# ============================================================
+# 데이터 소스 선택
+# ============================================================
+
+source = st.radio(
+    "비교 데이터 선택",
+    [
+        "직접 DNA 서열 입력",
+        "NCBI에서 비교 서열 검색",
+        "ClinVar에서 알려진 변이 검색"
+    ],
+    horizontal=True
+)
+
+
+# ============================================================
+# 1. 직접 DNA 입력
+# ============================================================
+
+if source == "직접 DNA 서열 입력":
+
+    st.subheader("비교 DNA 직접 입력")
+
+    sample_input = st.text_area(
+        "비교할 DNA 서열",
+        height=150,
+        placeholder="ATGCGT..."
     )
 
-    # 입력 여부 확인
-    if not clean_sample:
+    if st.button(
+        "DNA 비교 분석",
+        type="primary",
+        use_container_width=True,
+        key="manual_variant"
+    ):
 
-        st.warning(
-            "비교할 DNA 서열을 입력해주세요."
+        if "sequence" not in st.session_state:
+
+            st.warning("먼저 NCBI에서 기준 DNA를 검색해주세요.")
+
+        else:
+
+            sample = (
+                sample_input
+                .upper()
+                .replace(" ", "")
+                .replace("\n", "")
+            )
+
+            if not sample:
+
+                st.warning("비교할 DNA 서열을 입력해주세요.")
+
+            elif any(base not in "ATGC" for base in sample):
+
+                st.error("DNA 서열에는 A, T, G, C만 입력해주세요.")
+
+            else:
+
+                reference = st.session_state.sequence
+
+                variants = find_variants(reference, sample)
+
+                if variants is None:
+
+                    st.error(
+                        "현재 분석 방식에서는 기준 DNA와 비교 DNA의 "
+                        "길이가 같아야 합니다."
+                    )
+
+                else:
+
+                    st.session_state.variant_results = variants
+                    st.session_state.variant_sample = sample
+
+
+# ============================================================
+# 2. NCBI에서 비교 DNA 검색
+# ============================================================
+
+elif source == "NCBI에서 비교 서열 검색":
+
+    st.subheader("NCBI 비교 서열 검색")
+
+    compare_query = st.text_input(
+        "유전자명, accession 또는 검색어 입력",
+        placeholder="예: TP53 Homo sapiens"
+    )
+
+    if st.button(
+        "NCBI 비교 서열 검색",
+        use_container_width=True
+    ):
+
+        if compare_query:
+
+            try:
+
+                ids, total_count = search_nuccore(compare_query)
+
+                st.session_state.compare_ids = ids
+                st.session_state.compare_total_count = total_count
+
+                if ids:
+                    st.session_state.compare_summaries = (
+                        get_nuccore_summaries(ids)
+                    )
+
+            except Exception as e:
+
+                st.error(f"NCBI 검색 중 오류가 발생했습니다: {e}")
+
+
+    # 검색 결과 유지
+    if "compare_summaries" in st.session_state:
+
+        summaries = st.session_state.compare_summaries
+
+        total = st.session_state.get(
+            "compare_total_count",
+            len(summaries)
         )
 
-    # DNA 문자 확인
-    elif set(clean_sample) - set("ATGC"):
-
-        st.error(
-            "DNA 서열에는 A, T, G, C만 사용할 수 있습니다."
+        st.success(
+            f"NCBI에서 총 {total:,}개의 검색 결과를 찾았습니다. "
+            f"상위 {len(summaries)}개를 표시합니다."
         )
 
-    # 길이 확인
-    elif len(reference_sequence) != len(clean_sample):
+        options = {}
 
-        st.warning(
-            "현재 변이 분석은 동일한 길이의 "
-            "DNA 서열을 비교합니다."
+        for item in summaries:
+
+            label = (
+                f"{item['accession']} | "
+                f"{item['title']} | "
+                f"{item['length']:,} bp"
+            )
+
+            options[label] = item["uid"]
+
+        selected_label = st.selectbox(
+            "비교할 서열 선택",
+            list(options.keys())
         )
 
-        st.write(
-            f"기준 서열: {len(reference_sequence):,} bp"
+        if st.button(
+            "선택한 서열과 비교",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if "sequence" not in st.session_state:
+
+                st.warning("먼저 기준 DNA를 검색해주세요.")
+
+            else:
+
+                try:
+
+                    uid = options[selected_label]
+
+                    sample = fetch_nuccore_sequence(uid)
+                    reference = st.session_state.sequence
+
+                    variants = find_variants(reference, sample)
+
+                    if variants is None:
+
+                        st.error(
+                            "두 서열의 길이가 다릅니다. "
+                            "현재 버전에서는 길이가 같은 서열끼리 "
+                            "염기 위치를 직접 비교합니다."
+                        )
+
+                        st.info(
+                            f"기준 서열: {len(reference):,} bp / "
+                            f"비교 서열: {len(sample):,} bp"
+                        )
+
+                    else:
+
+                        st.session_state.variant_results = variants
+                        st.session_state.variant_sample = sample
+
+                        st.success(
+                            "NCBI 비교 서열을 불러왔습니다."
+                        )
+
+                except Exception as e:
+
+                    st.error(
+                        f"서열을 가져오는 중 오류가 발생했습니다: {e}"
+                    )
+
+
+# ============================================================
+# 3. ClinVar 알려진 변이 검색
+# ============================================================
+
+elif source == "ClinVar에서 알려진 변이 검색":
+
+    st.subheader("ClinVar 알려진 변이 검색")
+
+    st.caption(
+        "ClinVar에서는 DNA 전체 서열 대신 "
+        "보고된 인간 유전체 변이 정보를 검색합니다."
+    )
+
+    clinvar_query = st.text_input(
+        "유전자명 또는 변이 검색",
+        placeholder="예: BRCA1 또는 TP53"
+    )
+
+    if st.button(
+        "ClinVar 검색",
+        type="primary",
+        use_container_width=True
+    ):
+
+        if clinvar_query:
+
+            try:
+
+                # ClinVar 검색
+                search_url = (
+                    "https://eutils.ncbi.nlm.nih.gov/"
+                    "entrez/eutils/esearch.fcgi"
+                )
+
+                search_params = {
+                    "db": "clinvar",
+                    "term": clinvar_query,
+                    "retmode": "json",
+                    "retmax": 10,
+                    "api_key": NCBI_API_KEY,
+                    "email": NCBI_EMAIL
+                }
+
+                response = requests.get(
+                    search_url,
+                    params=search_params,
+                    timeout=20
+                )
+
+                response.raise_for_status()
+
+                search_data = response.json()
+
+                ids = search_data["esearchresult"]["idlist"]
+
+                total_count = int(
+                    search_data["esearchresult"]["count"]
+                )
+
+                st.session_state.clinvar_total = total_count
+
+
+                if not ids:
+
+                    st.warning("ClinVar 검색 결과가 없습니다.")
+
+                    st.session_state.pop(
+                        "clinvar_results",
+                        None
+                    )
+
+                else:
+
+                    # 검색된 ClinVar ID들의 상세 요약 가져오기
+                    summary_url = (
+                        "https://eutils.ncbi.nlm.nih.gov/"
+                        "entrez/eutils/esummary.fcgi"
+                    )
+
+                    summary_params = {
+                        "db": "clinvar",
+                        "id": ",".join(ids),
+                        "retmode": "json",
+                        "api_key": NCBI_API_KEY,
+                        "email": NCBI_EMAIL
+                    }
+
+                    summary_response = requests.get(
+                        summary_url,
+                        params=summary_params,
+                        timeout=20
+                    )
+
+                    summary_response.raise_for_status()
+
+                    summary_data = summary_response.json()
+
+                    results = []
+
+                    for uid in ids:
+
+                        record = summary_data["result"].get(
+                            uid,
+                            {}
+                        )
+
+                        results.append({
+                            "ClinVar ID": uid,
+                            "변이": record.get(
+                                "title",
+                                "정보 없음"
+                            ),
+                            "변이 유형": record.get(
+                                "obj_type",
+                                record.get(
+                                    "variation_set",
+                                    "정보 없음"
+                                )
+                            ),
+                            "임상적 분류": record.get(
+                                "germline_classification",
+                                {}
+                            ).get(
+                                "description",
+                                "정보 없음"
+                            )
+                            if isinstance(
+                                record.get(
+                                    "germline_classification",
+                                    {}
+                                ),
+                                dict
+                            )
+                            else "정보 없음"
+                        })
+
+                    st.session_state.clinvar_results = results
+
+            except Exception as e:
+
+                st.error(
+                    f"ClinVar 검색 중 오류가 발생했습니다: {e}"
+                )
+
+
+    # ClinVar 결과를 rerun 후에도 유지
+    if "clinvar_results" in st.session_state:
+
+        results = st.session_state.clinvar_results
+
+        total = st.session_state.get(
+            "clinvar_total",
+            len(results)
         )
 
-        st.write(
-            f"비교 서열: {len(clean_sample):,} bp"
+        st.success(
+            f"ClinVar에서 총 {total:,}개의 관련 변이를 찾았습니다. "
+            f"상위 {len(results)}개를 표시합니다."
         )
 
-    else:
+        clinvar_df = pd.DataFrame(results)
 
-        variants = find_variants(
-            reference_sequence,
-            clean_sample
+        st.dataframe(
+            clinvar_df,
+            use_container_width=True,
+            hide_index=True
         )
 
-        # 결과를 저장합니다.
-        st.session_state.variant_results = variants
-        st.session_state.variant_sample = clean_sample
+        st.info(
+            "ClinVar 결과는 알려진 변이에 대한 데이터베이스 정보를 "
+            "보여주는 기능입니다. 이 앱이 자체적으로 질병 여부를 "
+            "판단하는 것은 아닙니다."
+        )
 
 
-# --------------------------------------------------
-# 변이 분석 결과
-# --------------------------------------------------
+# ============================================================
+# DNA 직접 비교 결과
+# ============================================================
 
-if "variant_results" in st.session_state:
+if (
+    source != "ClinVar에서 알려진 변이 검색"
+    and "variant_results" in st.session_state
+    and "variant_sample" in st.session_state
+):
 
     variants = st.session_state.variant_results
+    sample = st.session_state.variant_sample
+    reference = st.session_state.sequence
 
     st.divider()
+    st.subheader("변이 분석 결과")
 
-    if not variants:
+    if len(variants) == 0:
 
         st.success(
-            "두 DNA 서열이 완전히 일치합니다."
+            "두 DNA 서열 사이에서 염기 치환이 발견되지 않았습니다."
         )
 
     else:
 
-        st.success(
-            f"총 {len(variants)}개의 염기 변이를 발견했습니다."
-        )
+        # ----------------------------------------------------
+        # 기본 통계
+        # ----------------------------------------------------
+
+        transition_count = 0
+        transversion_count = 0
+
+        detailed_results = []
+
+        for variant in variants:
+
+            ref = variant["기준 염기"]
+            alt = variant["비교 염기"]
+
+            substitution_type = classify_substitution(
+                ref,
+                alt
+            )
+
+            if substitution_type == "Transition":
+                transition_count += 1
+            else:
+                transversion_count += 1
+
+            codon_info = analyze_codon_change(
+                reference,
+                sample,
+                variant["위치"]
+            )
+
+            result = {
+                "위치": variant["위치"],
+                "기준 염기": ref,
+                "비교 염기": alt,
+                "치환 유형": substitution_type
+            }
+
+            if codon_info:
+
+                result.update(codon_info)
+
+            detailed_results.append(result)
+
+
+        # ----------------------------------------------------
+        # 결과 요약
+        # ----------------------------------------------------
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "총 변이 수",
+                len(variants)
+            )
+
+        with col2:
+            st.metric(
+                "Transition",
+                transition_count
+            )
+
+        with col3:
+            st.metric(
+                "Transversion",
+                transversion_count
+            )
+
+
+        # ----------------------------------------------------
+        # 상세 변이 표
+        # ----------------------------------------------------
+
+        st.subheader("염기 · 코돈 · 아미노산 변화")
 
         variant_df = pd.DataFrame(
-            variants
+            detailed_results
         )
 
         st.dataframe(
@@ -830,72 +1346,35 @@ if "variant_results" in st.session_state:
             hide_index=True
         )
 
-        # ------------------------------------------
-        # 염기 변이 유형
-        # ------------------------------------------
 
-        st.subheader("변이 유형")
+        # ----------------------------------------------------
+        # 변이 위치 그래프
+        # ----------------------------------------------------
 
-        transition_count = 0
-        transversion_count = 0
+        st.subheader("DNA 내 변이 위치")
 
-        transitions = {
-            ("A", "G"),
-            ("G", "A"),
-            ("C", "T"),
-            ("T", "C")
-        }
-
-        for variant in variants:
-
-            pair = (
-                variant["기준 염기"],
-                variant["비교 염기"]
-            )
-
-            if pair in transitions:
-                transition_count += 1
-            else:
-                transversion_count += 1
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "Transition",
-                transition_count
-            )
-
-        with col2:
-
-            st.metric(
-                "Transversion",
-                transversion_count
-            )
-
-
-        # ------------------------------------------
-        # 변이 위치 시각화
-        # ------------------------------------------
-
-        variant_plot = pd.DataFrame({
+        graph_df = pd.DataFrame({
             "위치": [
-                item["위치"]
-                for item in variants
+                v["위치"]
+                for v in variants
             ],
             "변이": [
-                f"{item['기준 염기']} → "
-                f"{item['비교 염기']}"
-                for item in variants
-            ]
+                f"{v['기준 염기']} → {v['비교 염기']}"
+                for v in variants
+            ],
+            "값": [1] * len(variants)
         })
 
         fig = px.scatter(
-            variant_plot,
+            graph_df,
             x="위치",
-            y="변이",
-            title="DNA 변이 위치"
+            y="값",
+            hover_name="변이",
+            title="DNA 서열 내 변이 위치"
+        )
+
+        fig.update_yaxes(
+            visible=False
         )
 
         st.plotly_chart(
