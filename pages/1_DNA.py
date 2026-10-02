@@ -2,1382 +2,384 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
+from Bio.Align import PairwiseAligner
 
-
-# --------------------------------------------------
-# 기본 설정
-# --------------------------------------------------
-
-st.set_page_config(
-    page_title="DNA 분석",
-    page_icon="🧬",
-    layout="wide"
-)
-
-
-# --------------------------------------------------
-# NCBI API 설정
-# --------------------------------------------------
+st.set_page_config(page_title="DNA 분석", page_icon="🧬", layout="wide")
 
 NCBI_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+API = {"tool": "BioLabAnalyzer", "email": st.secrets["NCBI_EMAIL"], "api_key": st.secrets["NCBI_API_KEY"]}
 
-# Streamlit Secrets에서 API 정보를 가져옵니다.
-NCBI_API_KEY = st.secrets["NCBI_API_KEY"]
-NCBI_EMAIL = st.secrets["NCBI_EMAIL"]
-
-
-# --------------------------------------------------
-# DNA 분석 함수
-# --------------------------------------------------
-
-def count_bases(sequence):
-    """DNA의 각 염기 개수를 계산합니다."""
-
-    return {
-        "A": sequence.count("A"),
-        "T": sequence.count("T"),
-        "G": sequence.count("G"),
-        "C": sequence.count("C")
-    }
+# -------------------- 공통 함수 --------------------
+def ncbi_get(endpoint, db, **params):
+    r = requests.get(NCBI_URL + endpoint, params={"db": db, **params, **API}, timeout=20)
+    r.raise_for_status()
+    return r
 
 
-def calculate_gc(sequence):
-    """DNA의 GC 함량을 계산합니다."""
-
-    if len(sequence) == 0:
-        return 0
-
-    gc_count = sequence.count("G") + sequence.count("C")
-
-    return gc_count / len(sequence) * 100
+def search_db(db, term, retmax=10):
+    data = ncbi_get("esearch.fcgi", db, term=term, retmode="json", retmax=retmax).json()["esearchresult"]
+    return data["idlist"], int(data["count"])
 
 
-# --------------------------------------------------
-# NCBI 검색
-# --------------------------------------------------
-
-def search_ncbi(gene_name, organism):
-    """NCBI에서 입력한 유전자를 검색합니다."""
-
-    search_term = (
-        f"{gene_name}[Gene Name] "
-        f"AND {organism}[Organism]"
-    )
-
-    params = {
-        "db": "nuccore",
-        "term": search_term,
-        "retmode": "json",
-        "retmax": 5,
-        "tool": "BioLabAnalyzer",
-        "email": NCBI_EMAIL,
-        "api_key": NCBI_API_KEY
-    }
-
-    response = requests.get(
-        NCBI_URL + "esearch.fcgi",
-        params=params,
-        timeout=15
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    return data["esearchresult"]["idlist"]
+def summaries(db, ids):
+    if not ids:
+        return []
+    data = ncbi_get("esummary.fcgi", db, id=",".join(ids), retmode="json").json()["result"]
+    return [data.get(i, {}) for i in ids]
 
 
-def get_ncbi_summary(ids):
-    """검색된 DNA 기록의 정보를 가져옵니다."""
-
-    params = {
-        "db": "nuccore",
-        "id": ",".join(ids),
-        "retmode": "json",
-        "tool": "BioLabAnalyzer",
-        "email": NCBI_EMAIL,
-        "api_key": NCBI_API_KEY
-    }
-
-    response = requests.get(
-        NCBI_URL + "esummary.fcgi",
-        params=params,
-        timeout=15
-    )
-
-    response.raise_for_status()
-
-    data = response.json()["result"]
-
-    results = []
-
-    for record_id in ids:
-
-        record = data.get(record_id, {})
-
-        results.append({
-            "ID": record_id,
-            "제목": record.get(
-                "title",
-                "정보 없음"
-            ),
-            "길이": record.get(
-                "slen",
-                "정보 없음"
-            )
-        })
-
-    return results
+def fetch_sequence(record_id):
+    text = ncbi_get("efetch.fcgi", "nuccore", id=record_id, rettype="fasta", retmode="text").text
+    return "".join(x.strip() for x in text.splitlines() if not x.startswith(">" )).upper()
 
 
-def get_ncbi_sequence(record_id):
-    """선택한 NCBI 기록에서 DNA 서열을 가져옵니다."""
-
-    params = {
-        "db": "nuccore",
-        "id": record_id,
-        "rettype": "fasta",
-        "retmode": "text",
-        "tool": "BioLabAnalyzer",
-        "email": NCBI_EMAIL,
-        "api_key": NCBI_API_KEY
-    }
-
-    response = requests.get(
-        NCBI_URL + "efetch.fcgi",
-        params=params,
-        timeout=15
-    )
-
-    response.raise_for_status()
-
-    lines = response.text.strip().splitlines()
-
-    # FASTA의 설명 부분을 제외하고 DNA만 가져옵니다.
-    sequence = "".join(
-        line.strip()
-        for line in lines
-        if not line.startswith(">")
-    )
-
-    return sequence
+def clean_dna(seq):
+    return "".join(seq.upper().split())
 
 
-# --------------------------------------------------
-# 코돈 → 아미노산 변환표
-# --------------------------------------------------
+def base_counts(seq):
+    return {b: seq.count(b) for b in "ATGC"}
 
+
+def gc_percent(seq):
+    return 100 * (seq.count("G") + seq.count("C")) / len(seq) if seq else 0
+
+
+# -------------------- 번역 / ORF --------------------
 codon_table = {
-    "TTT": "F", "TTC": "F",
-    "TTA": "L", "TTG": "L",
+    "TTT":"F","TTC":"F","TTA":"L","TTG":"L","TCT":"S","TCC":"S","TCA":"S","TCG":"S",
+    "TAT":"Y","TAC":"Y","TAA":"*","TAG":"*","TGT":"C","TGC":"C","TGA":"*","TGG":"W",
+    "CTT":"L","CTC":"L","CTA":"L","CTG":"L","CCT":"P","CCC":"P","CCA":"P","CCG":"P",
+    "CAT":"H","CAC":"H","CAA":"Q","CAG":"Q","CGT":"R","CGC":"R","CGA":"R","CGG":"R",
+    "ATT":"I","ATC":"I","ATA":"I","ATG":"M","ACT":"T","ACC":"T","ACA":"T","ACG":"T",
+    "AAT":"N","AAC":"N","AAA":"K","AAG":"K","AGT":"S","AGC":"S","AGA":"R","AGG":"R",
+    "GTT":"V","GTC":"V","GTA":"V","GTG":"V","GCT":"A","GCC":"A","GCA":"A","GCG":"A",
+    "GAT":"D","GAC":"D","GAA":"E","GAG":"E","GGT":"G","GGC":"G","GGA":"G","GGG":"G"
+}
 
-    "TCT": "S", "TCC": "S",
-    "TCA": "S", "TCG": "S",
-
-    "TAT": "Y", "TAC": "Y",
-
-    "TAA": "*", "TAG": "*",
-
-    "TGT": "C", "TGC": "C",
-    "TGA": "*", "TGG": "W",
-
-    "CTT": "L", "CTC": "L",
-    "CTA": "L", "CTG": "L",
-
-    "CCT": "P", "CCC": "P",
-    "CCA": "P", "CCG": "P",
-
-    "CAT": "H", "CAC": "H",
-    "CAA": "Q", "CAG": "Q",
-
-    "CGT": "R", "CGC": "R",
-    "CGA": "R", "CGG": "R",
-
-    "ATT": "I", "ATC": "I",
-    "ATA": "I", "ATG": "M",
-
-    "ACT": "T", "ACC": "T",
-    "ACA": "T", "ACG": "T",
-
-    "AAT": "N", "AAC": "N",
-    "AAA": "K", "AAG": "K",
-
-    "AGT": "S", "AGC": "S",
-    "AGA": "R", "AGG": "R",
-
-    "GTT": "V", "GTC": "V",
-    "GTA": "V", "GTG": "V",
-
-    "GCT": "A", "GCC": "A",
-    "GCA": "A", "GCG": "A",
-
-    "GAT": "D", "GAC": "D",
-    "GAA": "E", "GAG": "E",
-
-    "GGT": "G", "GGC": "G",
-    "GGA": "G", "GGG": "G"
+amino_names = {
+    "A":"Alanine","R":"Arginine","N":"Asparagine","D":"Aspartic acid","C":"Cysteine",
+    "E":"Glutamic acid","Q":"Glutamine","G":"Glycine","H":"Histidine","I":"Isoleucine",
+    "L":"Leucine","K":"Lysine","M":"Methionine","F":"Phenylalanine","P":"Proline",
+    "S":"Serine","T":"Threonine","W":"Tryptophan","Y":"Tyrosine","V":"Valine"
 }
 
 
-amino_acid_names = {
-    "A": "Alanine",
-    "R": "Arginine",
-    "N": "Asparagine",
-    "D": "Aspartic acid",
-    "C": "Cysteine",
-    "E": "Glutamic acid",
-    "Q": "Glutamine",
-    "G": "Glycine",
-    "H": "Histidine",
-    "I": "Isoleucine",
-    "L": "Leucine",
-    "K": "Lysine",
-    "M": "Methionine",
-    "F": "Phenylalanine",
-    "P": "Proline",
-    "S": "Serine",
-    "T": "Threonine",
-    "W": "Tryptophan",
-    "Y": "Tyrosine",
-    "V": "Valine"
-}
+def translate(seq):
+    return "".join(codon_table.get(seq[i:i+3], "?") for i in range(0, len(seq)-2, 3))
 
 
-def translate_dna(sequence):
-    """DNA를 3개씩 읽어 아미노산 서열로 변환합니다."""
-
-    protein = []
-
-    for i in range(0, len(sequence) - 2, 3):
-
-        codon = sequence[i:i + 3]
-
-        protein.append(
-            codon_table.get(codon, "?")
-        )
-
-    return "".join(protein)
-
-
-def find_orfs(sequence):
-    """3개의 reading frame에서 ORF를 찾습니다."""
-
-    orfs = []
-
-    stop_codons = {
-        "TAA",
-        "TAG",
-        "TGA"
-    }
-
-    # DNA를 0, 1, 2번째 위치부터 각각 읽어봅니다.
+def find_orfs(seq):
+    orfs, stops = [], {"TAA", "TAG", "TGA"}
     for frame in range(3):
-
-        i = frame
-
-        while i <= len(sequence) - 3:
-
-            codon = sequence[i:i + 3]
-
-            # 시작 코돈을 찾습니다.
-            if codon == "ATG":
-
-                start = i
-                j = i + 3
-
-                # 시작 코돈 이후의 종결 코돈을 찾습니다.
-                while j <= len(sequence) - 3:
-
-                    current = sequence[j:j + 3]
-
-                    if current in stop_codons:
-
-                        end = j + 3
-
-                        dna = sequence[start:end]
-
-                        protein = translate_dna(dna)
-
-                        orfs.append({
-                            "frame": frame + 1,
-                            "start": start + 1,
-                            "end": end,
-                            "dna": dna,
-                            "protein": protein
-                        })
-
-                        break
-
-                    j += 3
-
-            i += 3
-
+        for start in range(frame, len(seq)-2, 3):
+            if seq[start:start+3] != "ATG":
+                continue
+            for end in range(start+3, len(seq)-2, 3):
+                if seq[end:end+3] in stops:
+                    dna = seq[start:end+3]
+                    orfs.append({"frame": frame+1, "start": start+1, "end": end+3,
+                                 "dna": dna, "protein": translate(dna)})
+                    break
     return orfs
 
 
-# --------------------------------------------------
-# 화면
-# --------------------------------------------------
+# -------------------- 서열 정렬 / 변이 분석 --------------------
+def align_variants(reference, sample):
+    """긴 기준 서열에서 비교 서열과 가장 잘 맞는 구간을 찾아 SNP/삽입/결실을 반환합니다."""
+    aligner = PairwiseAligner()
+    aligner.mode = "local"
+    aligner.match_score = 2
+    aligner.mismatch_score = -1
+    aligner.open_gap_score = -3
+    aligner.extend_gap_score = -1
 
-st.title("🧬 DNA Analysis")
+    alignment = aligner.align(reference, sample)[0]
+    coords = alignment.coordinates
+    variants, matches, columns = [], 0, 0
 
-st.write(
-    "NCBI에서 실제 유전자 서열을 가져와 "
-    "DNA의 특성과 ORF를 분석합니다."
-)
+    for k in range(len(coords[0]) - 1):
+        r1, r2 = int(coords[0][k]), int(coords[0][k+1])
+        s1, s2 = int(coords[1][k]), int(coords[1][k+1])
+        dr, ds = r2-r1, s2-s1
 
-
-# ==================================================
-# ① NCBI 유전자 검색
-# ==================================================
-
-st.subheader("① NCBI 유전자 검색")
-
-col1, col2 = st.columns(2)
-
-with col1:
-
-    gene_name = st.text_input(
-        "유전자명",
-        placeholder="예: TP53"
-    )
-
-with col2:
-
-    organism = st.text_input(
-        "생물 종",
-        value="Homo sapiens"
-    )
-
-
-if st.button(
-    "NCBI에서 검색하기",
-    type="primary",
-    use_container_width=True
-):
-
-    if not gene_name:
-
-        st.warning(
-            "검색할 유전자명을 입력해주세요."
-        )
-
-    else:
-
-        try:
-
-            with st.spinner(
-                "NCBI에서 검색 중..."
-            ):
-
-                ids = search_ncbi(
-                    gene_name,
-                    organism
-                )
-
-                if not ids:
-
-                    st.warning(
-                        "검색 결과가 없습니다."
-                    )
-
+        if dr and ds:  # 서로 대응되는 구간
+            n = min(dr, ds)
+            for j in range(n):
+                ref, alt = reference[r1+j], sample[s1+j]
+                columns += 1
+                if ref == alt:
+                    matches += 1
                 else:
-
-                    results = get_ncbi_summary(ids)
-
-                    st.session_state.ncbi_results = results
-
-        except requests.exceptions.RequestException:
-
-            st.error(
-                "NCBI 서버와 연결할 수 없습니다."
-            )
-
-
-# 검색 결과 표시
-if "ncbi_results" in st.session_state:
-
-    st.write("검색 결과")
-
-    result_df = pd.DataFrame(
-        st.session_state.ncbi_results
-    )
-
-    st.dataframe(
-        result_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    selected = st.selectbox(
-        "분석할 서열을 선택하세요.",
-        st.session_state.ncbi_results,
-        format_func=lambda x:
-            f"{x['ID']} | {x['제목']}"
-    )
-
-    if st.button(
-        "이 서열 분석하기",
-        use_container_width=True
-    ):
-
-        try:
-
-            with st.spinner(
-                "DNA 서열을 가져오는 중..."
-            ):
-
-                sequence = get_ncbi_sequence(
-                    selected["ID"]
-                )
-
-                st.session_state.sequence = sequence
-
-                # 새로운 DNA를 가져오면 이전 ORF 분석 결과를 초기화합니다.
-                st.session_state.pop("orfs", None)
-
-                st.success(
-                    "DNA 서열을 가져왔습니다."
-                )
-
-        except requests.exceptions.RequestException:
-
-            st.error(
-                "DNA 서열을 가져오는 데 실패했습니다."
-            )
-
-
-# ==================================================
-# ② DNA 기본 분석
-# ==================================================
-
-if "sequence" in st.session_state:
-
-    sequence = st.session_state.sequence
-
-    st.divider()
-
-    st.subheader("② DNA 기본 분석")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.metric(
-            "DNA 길이",
-            f"{len(sequence):,} bp"
-        )
-
-    with col2:
-
-        gc_content = calculate_gc(
-            sequence
-        )
-
-        st.metric(
-            "GC 함량",
-            f"{gc_content:.2f}%"
-        )
-
-    counts = count_bases(
-        sequence
-    )
-
-    base_df = pd.DataFrame({
-        "염기": list(counts.keys()),
-        "개수": list(counts.values())
-    })
-
-    fig = px.bar(
-        base_df,
-        x="염기",
-        y="개수",
-        title="DNA 염기 조성"
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
-
-
-# ==================================================
-# ③ ORF 및 아미노산 분석
-# ==================================================
-
-st.divider()
-
-st.subheader(
-    "③ ORF 및 아미노산 분석"
-)
-
-st.write(
-    "DNA에서 시작 코돈 ATG부터 "
-    "종결 코돈까지 이어지는 ORF를 찾고, "
-    "이를 아미노산 서열로 변환합니다."
-)
-
-
-# --------------------------------------------------
-# ORF 분석 버튼
-# --------------------------------------------------
-
-if st.button(
-    "ORF 분석하기",
-    type="primary",
-    use_container_width=True
-):
-
-    # ORF 분석 결과를 저장합니다.
-    orfs = find_orfs(sequence)
-
-    st.session_state.orfs = orfs
-
-
-# --------------------------------------------------
-# ORF 분석 결과
-# --------------------------------------------------
-
-# 버튼을 다시 누르지 않아도 저장된 결과를 보여줍니다.
-if "orfs" in st.session_state:
-
-    orfs = st.session_state.orfs
-
-    if not orfs:
-
-        st.warning(
-            "완전한 ORF를 찾지 못했습니다."
-        )
-
-    else:
-
-        st.success(
-            f"{len(orfs)}개의 ORF를 찾았습니다."
-        )
-
-
-        # ------------------------------------------
-        # ORF 선택
-        # ------------------------------------------
-
-        orf_options = {
-            f"ORF {i + 1} | "
-            f"Frame {orf['frame']} | "
-            f"{orf['start']}–{orf['end']}": i
-            for i, orf in enumerate(orfs)
-        }
-
-        selected_orf_label = st.selectbox(
-            "분석할 ORF를 선택하세요.",
-            list(orf_options.keys())
-        )
-
-        selected_index = orf_options[
-            selected_orf_label
-        ]
-
-        selected_orf = orfs[
-            selected_index
-        ]
-
-
-        # ------------------------------------------
-        # 선택한 ORF 기본 정보
-        # ------------------------------------------
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "ORF 길이",
-                f"{len(selected_orf['dna'])} bp"
-            )
-
-        with col2:
-
-            st.metric(
-                "아미노산 길이",
-                f"{len(selected_orf['protein']) - 1} aa"
-            )
-
-
-        # ------------------------------------------
-        # 아미노산 서열
-        # ------------------------------------------
-
-        st.write(
-            "번역된 아미노산 서열"
-        )
-
-        st.code(
-            selected_orf["protein"]
-        )
-
-
-        # ------------------------------------------
-        # 특정 아미노산 검색
-        # ------------------------------------------
-
-        st.write(
-            "아미노산 서열에서 원하는 아미노산을 찾습니다."
-        )
-
-        amino_options = {
-            f"{name} ({code})": code
-            for code, name
-            in amino_acid_names.items()
-        }
-
-        selected_amino_name = st.selectbox(
-            "검색할 아미노산",
-            list(amino_options.keys())
-        )
-
-        selected_amino = amino_options[
-            selected_amino_name
-        ]
-
-
-        # ------------------------------------------
-        # 아미노산 위치 검색
-        # ------------------------------------------
-
-        protein = selected_orf[
-            "protein"
-        ]
-
-        positions = [
-            i + 1
-            for i, amino in enumerate(protein)
-            if amino == selected_amino
-        ]
-
-
-        if positions:
-
-            st.success(
-                f"{selected_amino_name} "
-                f"{len(positions)}개 발견"
-            )
-
-            st.write(
-                "아미노산 위치:",
-                ", ".join(
-                    map(str, positions)
-                )
-            )
-
-        else:
-
-            st.info(
-                "해당 아미노산을 찾지 못했습니다."
-            )
-
-
-# ============================================================
-# ④ DNA 변이 분석
-# ============================================================
-
-st.divider()
-st.header("④ DNA 변이 분석")
-
-st.write(
-    "기준 DNA와 비교 DNA의 염기서열을 비교하거나, "
-    "ClinVar에서 알려진 유전자 변이를 검색할 수 있습니다."
-)
-
-
-# ------------------------------------------------------------
-# NCBI Nuccore 검색
-# ------------------------------------------------------------
-def search_nuccore(query, retmax=10):
-
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-
-    params = {
-        "db": "nuccore",
-        "term": query,
-        "retmode": "json",
-        "retmax": retmax,
-        "api_key": NCBI_API_KEY,
-        "email": NCBI_EMAIL
-    }
-
-    response = requests.get(url, params=params, timeout=20)
-    response.raise_for_status()
-
-    data = response.json()
-
-    ids = data["esearchresult"]["idlist"]
-    count = int(data["esearchresult"]["count"])
-
-    return ids, count
-
-
-# ------------------------------------------------------------
-# NCBI 서열 정보 가져오기
-# ------------------------------------------------------------
-def get_nuccore_summaries(ids):
-
-    if not ids:
-        return []
-
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-
-    params = {
-        "db": "nuccore",
-        "id": ",".join(ids),
-        "retmode": "json",
-        "api_key": NCBI_API_KEY,
-        "email": NCBI_EMAIL
-    }
-
-    response = requests.get(url, params=params, timeout=20)
-    response.raise_for_status()
-
-    data = response.json()
-
-    results = []
-
-    for uid in ids:
-
-        info = data["result"].get(uid, {})
-
-        results.append({
-            "uid": uid,
-            "title": info.get("title", "제목 없음"),
-            "accession": info.get("accessionversion", ""),
-            "length": info.get("slen", 0)
-        })
-
-    return results
-
-
-# ------------------------------------------------------------
-# NCBI에서 실제 DNA 서열 가져오기
-# ------------------------------------------------------------
-def fetch_nuccore_sequence(uid):
-
-    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-
-    params = {
-        "db": "nuccore",
-        "id": uid,
-        "rettype": "fasta",
-        "retmode": "text",
-        "api_key": NCBI_API_KEY,
-        "email": NCBI_EMAIL
-    }
-
-    response = requests.get(url, params=params, timeout=20)
-    response.raise_for_status()
-
-    fasta = response.text
-
-    # FASTA 첫 줄(>로 시작하는 설명)을 제외하고
-    # 실제 DNA 염기서열만 합침
-    sequence = "".join(
-        line.strip()
-        for line in fasta.splitlines()
-        if not line.startswith(">")
-    )
-
-    return sequence.upper()
-
-
-# ------------------------------------------------------------
-# 두 DNA 서열의 변이 탐색
-# ------------------------------------------------------------
-def find_variants(reference, sample):
-
-    if len(reference) != len(sample):
-        return None
-
-    variants = []
-
-    for i, (ref_base, sample_base) in enumerate(zip(reference, sample)):
-
-        if ref_base != sample_base:
-
-            variants.append({
-                "위치": i + 1,
-                "기준 염기": ref_base,
-                "비교 염기": sample_base
-            })
-
-    return variants
-
-
-# ------------------------------------------------------------
-# Transition / Transversion 구분
-# ------------------------------------------------------------
-def classify_substitution(ref, alt):
-
-    transition_pairs = {
-        ("A", "G"),
-        ("G", "A"),
-        ("C", "T"),
-        ("T", "C")
-    }
-
-    if (ref, alt) in transition_pairs:
-        return "Transition"
-
-    return "Transversion"
-
-
-# ------------------------------------------------------------
-# 변이가 코돈과 아미노산에 미치는 영향 분석
-# ------------------------------------------------------------
-def analyze_codon_change(reference, sample, position):
-
-    # position은 1부터 시작하므로 Python index로 변환
-    index = position - 1
-
-    codon_start = (index // 3) * 3
-
-    ref_codon = reference[codon_start:codon_start + 3]
-    alt_codon = sample[codon_start:codon_start + 3]
-
-    # 마지막에 불완전한 코돈이 있으면 분석하지 않음
-    if len(ref_codon) != 3 or len(alt_codon) != 3:
-        return None
-
-    ref_aa = CODON_TABLE.get(ref_codon, "?")
-    alt_aa = CODON_TABLE.get(alt_codon, "?")
-
-    # 변이 종류 분류
-    if ref_aa == alt_aa:
-        effect = "동의적 변이 (Synonymous)"
-
-    elif alt_aa == "*":
-        effect = "종결 코돈 생성 (Nonsense)"
-
-    else:
-        effect = "아미노산 변화 (Missense)"
+                    variants.append({"기준 위치": r1+j+1, "기준 염기": ref, "비교 염기": alt, "유형": "SNP"})
+
+        elif dr:  # 비교 서열에서 빠진 염기
+            columns += dr
+            for j in range(dr):
+                variants.append({"기준 위치": r1+j+1, "기준 염기": reference[r1+j], "비교 염기": "-", "유형": "Deletion"})
+
+        elif ds:  # 비교 서열에 추가된 염기
+            columns += ds
+            pos = r1 + 1
+            for j in range(ds):
+                variants.append({"기준 위치": pos, "기준 염기": "-", "비교 염기": sample[s1+j], "유형": "Insertion"})
+
+    ref_start, ref_end = int(coords[0][0])+1, int(coords[0][-1])
+    sample_covered = int(coords[1][-1] - coords[1][0])
+    identity = 100 * matches / columns if columns else 0
+    coverage = 100 * sample_covered / len(sample) if sample else 0
 
     return {
-        "기준 코돈": ref_codon,
-        "변이 코돈": alt_codon,
-        "기준 아미노산": ref_aa,
-        "변이 아미노산": alt_aa,
-        "영향": effect
+        "variants": variants,
+        "start": ref_start,
+        "end": ref_end,
+        "identity": identity,
+        "coverage": coverage,
+        "score": alignment.score
     }
 
 
-# ============================================================
-# 데이터 소스 선택
-# ============================================================
-
-source = st.radio(
-    "비교 데이터 선택",
-    [
-        "직접 DNA 서열 입력",
-        "NCBI에서 비교 서열 검색",
-        "ClinVar에서 알려진 변이 검색"
-    ],
-    horizontal=True
-)
+def substitution_type(ref, alt):
+    if ref == "-" or alt == "-":
+        return "-"
+    return "Transition" if (ref, alt) in {("A","G"),("G","A"),("C","T"),("T","C")} else "Transversion"
 
 
-# ============================================================
-# 1. 직접 DNA 입력
-# ============================================================
+def add_orf_effect(variant, reference, selected_orf):
+    """SNP가 선택한 ORF 안에 있을 때만 코돈/아미노산 변화를 계산합니다."""
+    if variant["유형"] != "SNP" or not selected_orf:
+        return variant
 
-if source == "직접 DNA 서열 입력":
+    pos = variant["기준 위치"]
+    if not (selected_orf["start"] <= pos <= selected_orf["end"]):
+        return variant
 
-    st.subheader("비교 DNA 직접 입력")
+    offset = pos - selected_orf["start"]
+    codon_start = selected_orf["start"] - 1 + (offset // 3) * 3
+    ref_codon = reference[codon_start:codon_start+3]
+    alt_codon = list(ref_codon)
+    alt_codon[offset % 3] = variant["비교 염기"]
+    alt_codon = "".join(alt_codon)
+    ref_aa, alt_aa = codon_table.get(ref_codon, "?"), codon_table.get(alt_codon, "?")
 
-    sample_input = st.text_area(
-        "비교할 DNA 서열",
-        height=150,
-        placeholder="ATGCGT..."
-    )
+    if ref_aa == alt_aa:
+        effect = "Synonymous"
+    elif alt_aa == "*":
+        effect = "Nonsense"
+    else:
+        effect = "Missense"
 
-    if st.button(
-        "DNA 비교 분석",
-        type="primary",
-        use_container_width=True,
-        key="manual_variant"
-    ):
+    return {**variant, "기준 코돈": ref_codon, "변이 코돈": alt_codon,
+            "기준 아미노산": ref_aa, "변이 아미노산": alt_aa, "영향": effect}
 
-        if "sequence" not in st.session_state:
 
-            st.warning("먼저 NCBI에서 기준 DNA를 검색해주세요.")
+def save_alignment(sample):
+    result = align_variants(st.session_state.sequence, sample)
+    st.session_state.variant_sample = sample
+    st.session_state.variant_result = result
 
+
+# ==================== 화면 ====================
+st.title("🧬 DNA Analysis")
+st.write("NCBI 유전자 서열을 가져와 DNA 특성, ORF, 아미노산 및 변이를 분석합니다.")
+
+# ① NCBI 검색
+st.subheader("① NCBI 유전자 검색")
+c1, c2 = st.columns(2)
+gene = c1.text_input("유전자명", placeholder="예: TP53")
+organism = c2.text_input("생물 종", value="Homo sapiens")
+
+if st.button("NCBI에서 검색하기", type="primary", use_container_width=True):
+    if not gene:
+        st.warning("검색할 유전자명을 입력해주세요.")
+    else:
+        try:
+            ids, total = search_db("nuccore", f"{gene}[Gene Name] AND {organism}[Organism]", 5)
+            rows = summaries("nuccore", ids)
+            st.session_state.ncbi_total = total
+            st.session_state.ncbi_results = [
+                {"ID": i, "제목": r.get("title", "정보 없음"), "길이": r.get("slen", "정보 없음")}
+                for i, r in zip(ids, rows)
+            ]
+        except requests.RequestException:
+            st.error("NCBI 서버와 연결할 수 없습니다.")
+
+if "ncbi_results" in st.session_state:
+    results = st.session_state.ncbi_results
+    st.write(f"검색 결과: 총 {st.session_state.get('ncbi_total', len(results)):,}개 (상위 {len(results)}개 표시)")
+    st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+    selected = st.selectbox("분석할 서열", results, format_func=lambda x: f"{x['ID']} | {x['제목']}")
+
+    if st.button("이 서열 분석하기", use_container_width=True):
+        try:
+            st.session_state.sequence = fetch_sequence(selected["ID"])
+            for key in ("orfs", "variant_result", "variant_sample"):
+                st.session_state.pop(key, None)
+            st.success("DNA 서열을 가져왔습니다.")
+        except requests.RequestException:
+            st.error("DNA 서열을 가져오는 데 실패했습니다.")
+
+
+if "sequence" not in st.session_state:
+    st.info("먼저 위에서 기준 DNA 서열을 선택해주세요.")
+    st.stop()
+
+sequence = st.session_state.sequence
+
+# ② 기본 분석
+st.divider()
+st.subheader("② DNA 기본 분석")
+c1, c2 = st.columns(2)
+c1.metric("DNA 길이", f"{len(sequence):,} bp")
+c2.metric("GC 함량", f"{gc_percent(sequence):.2f}%")
+counts = base_counts(sequence)
+fig = px.bar(pd.DataFrame({"염기": counts.keys(), "개수": counts.values()}), x="염기", y="개수", title="DNA 염기 조성")
+st.plotly_chart(fig, use_container_width=True)
+with st.expander("GC 함량은 무엇을 의미하나요?"):
+    st.write("GC 함량은 전체 염기 중 G와 C가 차지하는 비율입니다. 서열의 특성을 비교하는 기본 지표로 활용됩니다.")
+
+# ③ ORF
+st.divider()
+st.subheader("③ ORF 및 아미노산 분석")
+with st.expander("ORF란?"):
+    st.write("ORF(Open Reading Frame)는 시작 코돈에서 종결 코돈까지 이어져 단백질로 번역될 가능성이 있는 염기서열 구간입니다.")
+
+if st.button("ORF 분석하기", type="primary", use_container_width=True):
+    st.session_state.orfs = find_orfs(sequence)
+
+selected_orf = None
+if "orfs" in st.session_state:
+    orfs = st.session_state.orfs
+    if not orfs:
+        st.warning("완전한 ORF를 찾지 못했습니다.")
+    else:
+        st.success(f"{len(orfs)}개의 ORF를 찾았습니다.")
+        labels = [f"ORF {i+1} | Frame {o['frame']} | {o['start']}–{o['end']}" for i, o in enumerate(orfs)]
+        idx = st.selectbox("분석할 ORF", range(len(orfs)), format_func=lambda i: labels[i])
+        selected_orf = orfs[idx]
+        st.session_state.selected_orf = selected_orf
+
+        c1, c2 = st.columns(2)
+        c1.metric("ORF 길이", f"{len(selected_orf['dna'])} bp")
+        c2.metric("아미노산 길이", f"{max(0, len(selected_orf['protein'])-1)} aa")
+        st.write("번역된 아미노산 서열")
+        st.code(selected_orf["protein"])
+
+        options = {f"{name} ({code})": code for code, name in amino_names.items()}
+        amino_label = st.selectbox("검색할 아미노산", options)
+        code = options[amino_label]
+        positions = [i+1 for i, aa in enumerate(selected_orf["protein"]) if aa == code]
+        st.write(f"{amino_label}: {len(positions)}개")
+        if positions:
+            st.write("위치:", ", ".join(map(str, positions)))
+else:
+    selected_orf = st.session_state.get("selected_orf")
+
+# ④ 변이 분석
+st.divider()
+st.subheader("④ DNA 변이 분석")
+st.write("비교 서열이 더 짧거나 길어도 기준 DNA에서 가장 유사한 구간을 찾아 정렬한 뒤 변이를 분석합니다.")
+
+source = st.radio("비교 데이터", ["직접 DNA 입력", "NCBI 비교 서열", "ClinVar 알려진 변이"], horizontal=True)
+
+if source == "직접 DNA 입력":
+    sample_text = st.text_area("비교할 DNA 서열", height=130, placeholder="ATGCGT...")
+    if st.button("변이 분석하기", type="primary", use_container_width=True, key="manual_align"):
+        sample = clean_dna(sample_text)
+        if not sample:
+            st.warning("비교할 DNA를 입력해주세요.")
+        elif any(b not in "ATGC" for b in sample):
+            st.error("A, T, G, C만 입력해주세요.")
         else:
+            save_alignment(sample)
 
-            sample = (
-                sample_input
-                .upper()
-                .replace(" ", "")
-                .replace("\n", "")
-            )
+elif source == "NCBI 비교 서열":
+    query = st.text_input("유전자명, accession 또는 검색어", placeholder="예: TP53 Homo sapiens")
+    if st.button("NCBI 비교 서열 검색", use_container_width=True):
+        try:
+            ids, total = search_db("nuccore", query, 10)
+            rows = summaries("nuccore", ids)
+            st.session_state.compare_total = total
+            st.session_state.compare_results = [
+                {"ID": i, "제목": r.get("title", "제목 없음"), "Accession": r.get("accessionversion", ""), "길이": r.get("slen", 0)}
+                for i, r in zip(ids, rows)
+            ]
+        except requests.RequestException:
+            st.error("NCBI 검색에 실패했습니다.")
 
-            if not sample:
-
-                st.warning("비교할 DNA 서열을 입력해주세요.")
-
-            elif any(base not in "ATGC" for base in sample):
-
-                st.error("DNA 서열에는 A, T, G, C만 입력해주세요.")
-
-            else:
-
-                reference = st.session_state.sequence
-
-                variants = find_variants(reference, sample)
-
-                if variants is None:
-
-                    st.error(
-                        "현재 분석 방식에서는 기준 DNA와 비교 DNA의 "
-                        "길이가 같아야 합니다."
-                    )
-
-                else:
-
-                    st.session_state.variant_results = variants
-                    st.session_state.variant_sample = sample
-
-
-# ============================================================
-# 2. NCBI에서 비교 DNA 검색
-# ============================================================
-
-elif source == "NCBI에서 비교 서열 검색":
-
-    st.subheader("NCBI 비교 서열 검색")
-
-    compare_query = st.text_input(
-        "유전자명, accession 또는 검색어 입력",
-        placeholder="예: TP53 Homo sapiens"
-    )
-
-    if st.button(
-        "NCBI 비교 서열 검색",
-        use_container_width=True
-    ):
-
-        if compare_query:
-
+    if "compare_results" in st.session_state:
+        rows = st.session_state.compare_results
+        st.write(f"검색 결과: 총 {st.session_state.get('compare_total', len(rows)):,}개 (상위 {len(rows)}개 표시)")
+        choice = st.selectbox("비교할 서열", rows, format_func=lambda x: f"{x['Accession']} | {x['제목']} | {x['길이']:,} bp")
+        if st.button("선택한 서열 변이 분석하기", type="primary", use_container_width=True):
             try:
+                save_alignment(fetch_sequence(choice["ID"]))
+            except requests.RequestException:
+                st.error("비교 서열을 가져오지 못했습니다.")
+
+else:  # ClinVar
+    query = st.text_input("유전자명 또는 변이", placeholder="예: BRCA1 또는 TP53")
+    if st.button("ClinVar 검색", use_container_width=True):
+        try:
+            ids, total = search_db("clinvar", query, 10)
+            rows = summaries("clinvar", ids)
+            st.session_state.clinvar_total = total
+            st.session_state.clinvar_results = [{"ID": i, **r} for i, r in zip(ids, rows)]
+        except requests.RequestException:
+            st.error("ClinVar 검색에 실패했습니다.")
 
-                ids, total_count = search_nuccore(compare_query)
-
-                st.session_state.compare_ids = ids
-                st.session_state.compare_total_count = total_count
-
-                if ids:
-                    st.session_state.compare_summaries = (
-                        get_nuccore_summaries(ids)
-                    )
-
-            except Exception as e:
-
-                st.error(f"NCBI 검색 중 오류가 발생했습니다: {e}")
-
-
-    # 검색 결과 유지
-    if "compare_summaries" in st.session_state:
-
-        summaries = st.session_state.compare_summaries
-
-        total = st.session_state.get(
-            "compare_total_count",
-            len(summaries)
-        )
-
-        st.success(
-            f"NCBI에서 총 {total:,}개의 검색 결과를 찾았습니다. "
-            f"상위 {len(summaries)}개를 표시합니다."
-        )
-
-        options = {}
-
-        for item in summaries:
-
-            label = (
-                f"{item['accession']} | "
-                f"{item['title']} | "
-                f"{item['length']:,} bp"
-            )
-
-            options[label] = item["uid"]
-
-        selected_label = st.selectbox(
-            "비교할 서열 선택",
-            list(options.keys())
-        )
-
-        if st.button(
-            "선택한 서열과 비교",
-            type="primary",
-            use_container_width=True
-        ):
-
-            if "sequence" not in st.session_state:
-
-                st.warning("먼저 기준 DNA를 검색해주세요.")
-
-            else:
-
-                try:
-
-                    uid = options[selected_label]
-
-                    sample = fetch_nuccore_sequence(uid)
-                    reference = st.session_state.sequence
-
-                    variants = find_variants(reference, sample)
-
-                    if variants is None:
-
-                        st.error(
-                            "두 서열의 길이가 다릅니다. "
-                            "현재 버전에서는 길이가 같은 서열끼리 "
-                            "염기 위치를 직접 비교합니다."
-                        )
-
-                        st.info(
-                            f"기준 서열: {len(reference):,} bp / "
-                            f"비교 서열: {len(sample):,} bp"
-                        )
-
-                    else:
-
-                        st.session_state.variant_results = variants
-                        st.session_state.variant_sample = sample
-
-                        st.success(
-                            "NCBI 비교 서열을 불러왔습니다."
-                        )
-
-                except Exception as e:
-
-                    st.error(
-                        f"서열을 가져오는 중 오류가 발생했습니다: {e}"
-                    )
-
-
-# ============================================================
-# 3. ClinVar 알려진 변이 검색
-# ============================================================
-
-elif source == "ClinVar에서 알려진 변이 검색":
-
-    st.subheader("ClinVar 알려진 변이 검색")
-
-    st.caption(
-        "ClinVar에서는 DNA 전체 서열 대신 "
-        "보고된 인간 유전체 변이 정보를 검색합니다."
-    )
-
-    clinvar_query = st.text_input(
-        "유전자명 또는 변이 검색",
-        placeholder="예: BRCA1 또는 TP53"
-    )
-
-    if st.button(
-        "ClinVar 검색",
-        type="primary",
-        use_container_width=True
-    ):
-
-        if clinvar_query:
-
-            try:
-
-                # ClinVar 검색
-                search_url = (
-                    "https://eutils.ncbi.nlm.nih.gov/"
-                    "entrez/eutils/esearch.fcgi"
-                )
-
-                search_params = {
-                    "db": "clinvar",
-                    "term": clinvar_query,
-                    "retmode": "json",
-                    "retmax": 10,
-                    "api_key": NCBI_API_KEY,
-                    "email": NCBI_EMAIL
-                }
-
-                response = requests.get(
-                    search_url,
-                    params=search_params,
-                    timeout=20
-                )
-
-                response.raise_for_status()
-
-                search_data = response.json()
-
-                ids = search_data["esearchresult"]["idlist"]
-
-                total_count = int(
-                    search_data["esearchresult"]["count"]
-                )
-
-                st.session_state.clinvar_total = total_count
-
-
-                if not ids:
-
-                    st.warning("ClinVar 검색 결과가 없습니다.")
-
-                    st.session_state.pop(
-                        "clinvar_results",
-                        None
-                    )
-
-                else:
-
-                    # 검색된 ClinVar ID들의 상세 요약 가져오기
-                    summary_url = (
-                        "https://eutils.ncbi.nlm.nih.gov/"
-                        "entrez/eutils/esummary.fcgi"
-                    )
-
-                    summary_params = {
-                        "db": "clinvar",
-                        "id": ",".join(ids),
-                        "retmode": "json",
-                        "api_key": NCBI_API_KEY,
-                        "email": NCBI_EMAIL
-                    }
-
-                    summary_response = requests.get(
-                        summary_url,
-                        params=summary_params,
-                        timeout=20
-                    )
-
-                    summary_response.raise_for_status()
-
-                    summary_data = summary_response.json()
-
-                    results = []
-
-                    for uid in ids:
-
-                        record = summary_data["result"].get(
-                            uid,
-                            {}
-                        )
-
-                        results.append({
-                            "ClinVar ID": uid,
-                            "변이": record.get(
-                                "title",
-                                "정보 없음"
-                            ),
-                            "변이 유형": record.get(
-                                "obj_type",
-                                record.get(
-                                    "variation_set",
-                                    "정보 없음"
-                                )
-                            ),
-                            "임상적 분류": record.get(
-                                "germline_classification",
-                                {}
-                            ).get(
-                                "description",
-                                "정보 없음"
-                            )
-                            if isinstance(
-                                record.get(
-                                    "germline_classification",
-                                    {}
-                                ),
-                                dict
-                            )
-                            else "정보 없음"
-                        })
-
-                    st.session_state.clinvar_results = results
-
-            except Exception as e:
-
-                st.error(
-                    f"ClinVar 검색 중 오류가 발생했습니다: {e}"
-                )
-
-
-    # ClinVar 결과를 rerun 후에도 유지
     if "clinvar_results" in st.session_state:
+        rows = st.session_state.clinvar_results
+        st.write(f"검색 결과: 총 {st.session_state.get('clinvar_total', len(rows)):,}개 (상위 {len(rows)}개 표시)")
+        choice = st.selectbox("분석할 ClinVar 변이", rows, format_func=lambda x: f"{x['ID']} | {x.get('title', '정보 없음')}")
 
-        results = st.session_state.clinvar_results
+        if st.button("선택한 변이 분석하기", type="primary", use_container_width=True):
+            st.session_state.selected_clinvar = choice
 
-        total = st.session_state.get(
-            "clinvar_total",
-            len(results)
-        )
+    if "selected_clinvar" in st.session_state:
+        v = st.session_state.selected_clinvar
+        classification = v.get("germline_classification", {})
+        if not isinstance(classification, dict):
+            classification = {}
+        genes = v.get("genes", [])
+        gene_text = ", ".join(g.get("symbol", "") for g in genes if isinstance(g, dict)) if isinstance(genes, list) else "정보 없음"
 
-        st.success(
-            f"ClinVar에서 총 {total:,}개의 관련 변이를 찾았습니다. "
-            f"상위 {len(results)}개를 표시합니다."
-        )
+        st.subheader("ClinVar 변이 분석 결과")
+        st.write("**변이:**", v.get("title", "정보 없음"))
+        st.write("**유전자:**", gene_text or "정보 없음")
+        st.write("**변이 유형:**", v.get("variant_type", v.get("obj_type", "정보 없음")))
+        st.write("**임상적 분류:**", classification.get("description", "정보 없음"))
+        st.caption("ClinVar는 알려진 변이 기록을 조회하는 기능이며, 전체 비교 DNA 서열을 제공하는 기능과는 다릅니다.")
 
-        clinvar_df = pd.DataFrame(results)
-
-        st.dataframe(
-            clinvar_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.info(
-            "ClinVar 결과는 알려진 변이에 대한 데이터베이스 정보를 "
-            "보여주는 기능입니다. 이 앱이 자체적으로 질병 여부를 "
-            "판단하는 것은 아닙니다."
-        )
-
-
-# ============================================================
-# DNA 직접 비교 결과
-# ============================================================
-
-if (
-    source != "ClinVar에서 알려진 변이 검색"
-    and "variant_results" in st.session_state
-    and "variant_sample" in st.session_state
-):
-
-    variants = st.session_state.variant_results
-    sample = st.session_state.variant_sample
-    reference = st.session_state.sequence
+# 정렬 결과는 직접 입력/NCBI 비교에서 표시
+if source != "ClinVar 알려진 변이" and "variant_result" in st.session_state:
+    r = st.session_state.variant_result
+    variants = r["variants"]
 
     st.divider()
     st.subheader("변이 분석 결과")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("가장 유사한 기준 구간", f"{r['start']:,}–{r['end']:,} bp")
+    c2.metric("서열 일치도", f"{r['identity']:.2f}%")
+    c3.metric("비교 서열 정렬 범위", f"{r['coverage']:.2f}%")
 
-    if len(variants) == 0:
-
-        st.success(
-            "두 DNA 서열 사이에서 염기 치환이 발견되지 않았습니다."
-        )
-
+    if not variants:
+        st.success("정렬된 구간에서 변이가 발견되지 않았습니다.")
     else:
+        selected_orf = st.session_state.get("selected_orf")
+        detailed = []
+        for v in variants:
+            item = {**v, "치환 유형": substitution_type(v["기준 염기"], v["비교 염기"])}
+            detailed.append(add_orf_effect(item, sequence, selected_orf))
 
-        # ----------------------------------------------------
-        # 기본 통계
-        # ----------------------------------------------------
+        df = pd.DataFrame(detailed)
+        st.write(f"총 {len(df)}개의 차이를 찾았습니다.")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        transition_count = 0
-        transversion_count = 0
+        counts = df["유형"].value_counts().rename_axis("유형").reset_index(name="개수")
+        st.plotly_chart(px.bar(counts, x="유형", y="개수", title="변이 유형"), use_container_width=True)
 
-        detailed_results = []
-
-        for variant in variants:
-
-            ref = variant["기준 염기"]
-            alt = variant["비교 염기"]
-
-            substitution_type = classify_substitution(
-                ref,
-                alt
-            )
-
-            if substitution_type == "Transition":
-                transition_count += 1
-            else:
-                transversion_count += 1
-
-            codon_info = analyze_codon_change(
-                reference,
-                sample,
-                variant["위치"]
-            )
-
-            result = {
-                "위치": variant["위치"],
-                "기준 염기": ref,
-                "비교 염기": alt,
-                "치환 유형": substitution_type
-            }
-
-            if codon_info:
-
-                result.update(codon_info)
-
-            detailed_results.append(result)
-
-
-        # ----------------------------------------------------
-        # 결과 요약
-        # ----------------------------------------------------
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric(
-                "총 변이 수",
-                len(variants)
-            )
-
-        with col2:
-            st.metric(
-                "Transition",
-                transition_count
-            )
-
-        with col3:
-            st.metric(
-                "Transversion",
-                transversion_count
-            )
-
-
-        # ----------------------------------------------------
-        # 상세 변이 표
-        # ----------------------------------------------------
-
-        st.subheader("염기 · 코돈 · 아미노산 변화")
-
-        variant_df = pd.DataFrame(
-            detailed_results
-        )
-
-        st.dataframe(
-            variant_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-        # ----------------------------------------------------
-        # 변이 위치 그래프
-        # ----------------------------------------------------
-
-        st.subheader("DNA 내 변이 위치")
-
-        graph_df = pd.DataFrame({
-            "위치": [
-                v["위치"]
-                for v in variants
-            ],
-            "변이": [
-                f"{v['기준 염기']} → {v['비교 염기']}"
-                for v in variants
-            ],
-            "값": [1] * len(variants)
-        })
-
-        fig = px.scatter(
-            graph_df,
-            x="위치",
-            y="값",
-            hover_name="변이",
-            title="DNA 서열 내 변이 위치"
-        )
-
-        fig.update_yaxes(
-            visible=False
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
+        positions = pd.DataFrame({"위치": [v["기준 위치"] for v in variants], "값": 1, "유형": [v["유형"] for v in variants]})
+        fig = px.scatter(positions, x="위치", y="값", hover_name="유형", title="기준 DNA 내 변이 위치")
+        fig.update_yaxes(visible=False)
+        st.plotly_chart(fig, use_container_width=True)
