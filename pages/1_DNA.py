@@ -291,10 +291,46 @@ if "orfs" in st.session_state:
     if not orfs:
         st.warning("완전한 ORF를 찾지 못했습니다.")
     else:
-        st.success(f"{len(orfs)}개의 ORF를 찾았습니다.")
-        labels = [f"ORF {i+1} | Frame {o['frame']} | {o['start']}–{o['end']}" for i, o in enumerate(orfs)]
-        idx = st.selectbox("분석할 ORF", range(len(orfs)), format_func=lambda i: labels[i])
-        selected_orf = orfs[idx]
+        st.success(f"총 {len(orfs)}개의 ORF를 찾았습니다.")
+        csort, cmin = st.columns(2)
+        sort_method = csort.selectbox(
+            "ORF 정렬 기준",
+            ["긴 길이순", "짧은 길이순", "DNA 위치순", "비교 서열 길이에 가까운 순"]
+        )
+        min_length = cmin.number_input("최소 ORF 길이 (bp)", min_value=0, value=300, step=30)
+        target_length = None
+        if sort_method == "비교 서열 길이에 가까운 순":
+            default_target = len(st.session_state.get("variant_sample", ""))
+            target_length = st.number_input(
+                "비교 DNA 길이 (bp)", min_value=1,
+                value=max(1, default_target), step=1,
+                help="비교 DNA 길이를 입력하면 길이 차이가 작은 ORF부터 표시합니다."
+            )
+        candidates = [(i, o) for i, o in enumerate(orfs) if len(o["dna"]) >= min_length]
+        if sort_method == "긴 길이순":
+            candidates.sort(key=lambda item: len(item[1]["dna"]), reverse=True)
+        elif sort_method == "짧은 길이순":
+            candidates.sort(key=lambda item: len(item[1]["dna"]))
+        elif sort_method == "비교 서열 길이에 가까운 순":
+            candidates.sort(key=lambda item: abs(len(item[1]["dna"]) - target_length))
+        else:
+            candidates.sort(key=lambda item: item[1]["start"])
+
+        st.caption(f"조건에 맞는 ORF: {len(candidates)}개 / 전체 {len(orfs)}개")
+        if not candidates:
+            st.warning("조건에 맞는 ORF가 없습니다. 최소 길이를 낮춰보세요.")
+            st.session_state.pop("selected_orf", None)
+            st.stop()
+
+        selected_id = st.selectbox(
+            "분석할 ORF",
+            [i for i, _ in candidates],
+            format_func=lambda i: (
+                f"ORF {i+1} | {len(orfs[i]['dna']):,} bp | "
+                f"Frame {orfs[i]['frame']} | {orfs[i]['start']:,}–{orfs[i]['end']:,}"
+            )
+        )
+        selected_orf = orfs[selected_id]
         st.session_state.selected_orf = selected_orf
 
         c1, c2 = st.columns(2)
