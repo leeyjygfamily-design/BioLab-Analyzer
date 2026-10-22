@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import numpy as np
 import requests
 from Bio.Align import PairwiseAligner
 
@@ -199,6 +201,60 @@ def analyze_orf_effect(reference, result, orf):
             "summary": "선택한 ORF의 코돈·아미노산 변화를 분석했습니다."}, None
 
 
+def recommend_orfs(orfs, result):
+    """정렬된 기준 좌표로 ORF 전체 포함 여부와 겹침 비율을 평가합니다."""
+    covered = result["mapping"]
+    ranked = []
+    for idx, orf in enumerate(orfs):
+        start, end = orf["start"] - 1, orf["end"]
+        length = end - start
+        overlap = sum(i in covered for i in range(start, end))
+        if not overlap:
+            continue
+        fraction = overlap / length
+        ranked.append({"index": idx, "orf": orf, "fraction": fraction,
+                       "full": overlap == length, "overlap": overlap,
+                       "length_diff": abs(length - len(st.session_state.get("variant_sample", "")))})
+    ranked.sort(key=lambda x: (-int(x["full"]), -x["fraction"],
+                               -x["overlap"], x["length_diff"]))
+    return ranked
+
+
+def dna_variant_figure(start, end, variants):
+    """정렬된 DNA 구간을 이중나선 모식도로 표현합니다. 실제 3차원 구조는 아닙니다."""
+    span = max(1, end - start)
+    x = np.linspace(start, end, 500)
+    theta = 4 * np.pi * (x - start) / span
+    fig = go.Figure()
+    for phase, color, label in [(0, "#2979B8", "DNA 가닥 1"),
+                                (np.pi, "#D18A35", "DNA 가닥 2")]:
+        fig.add_trace(go.Scatter(x=x, y=np.sin(theta + phase), mode="lines",
+                                 line=dict(color=color, width=3), name=label,
+                                 hoverinfo="skip"))
+    for xi in np.linspace(start, end, 32):
+        yy = np.sin(4 * np.pi * (xi - start) / span)
+        fig.add_shape(type="line", x0=xi, x1=xi, y0=-yy, y1=yy,
+                      line=dict(color="rgba(130,130,130,0.35)", width=1))
+    colors = {"SNP": "#DC3545", "Deletion": "#7B4DC4", "Insertion": "#159A75"}
+    for typ in ("SNP", "Deletion", "Insertion"):
+        group = [v for v in variants if v["유형"] == typ]
+        if not group:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[v["기준 위치"] for v in group], y=[0]*len(group),
+            mode="markers", name=typ,
+            marker=dict(size=12, color=colors[typ], symbol="diamond",
+                        line=dict(color="white", width=1)),
+            customdata=[[v["기준 염기"], v["비교 염기"]] for v in group],
+            hovertemplate="위치 %{x}<br>기준 %{customdata[0]} → 비교 %{customdata[1]}<extra>"+typ+"</extra>"
+        ))
+    fig.update_layout(title="DNA 이중나선 모식도와 변이 위치", xaxis_title="기준 DNA 위치 (bp)",
+                      yaxis=dict(visible=False, range=[-1.35, 1.35]),
+                      height=350, legend=dict(orientation="h", y=-0.22),
+                      margin=dict(l=10, r=10, t=55, b=70))
+    return fig
+
+
 def save_alignment(sample):
     reference = st.session_state.sequence
     # 로컬 정렬은 큰 서열에서 느리거나 메모리를 많이 사용할 수 있음
@@ -210,6 +266,7 @@ def save_alignment(sample):
         if result["aligned_bases"] < 12 or result["coverage"] < 50:
             st.warning("유사한 구간이 너무 짧거나 비교 서열의 절반 미만만 정렬되었습니다. 결과를 저장하지 않았습니다.")
             return
+        st.session_state.pop("recommended_orf_choice", None)
         st.session_state.variant_result = result
         st.session_state.variant_sample = sample
     except (ValueError, IndexError, MemoryError) as e:
@@ -250,7 +307,7 @@ if "ncbi_results" in st.session_state:
     if st.button("이 서열 분석하기", use_container_width=True):
         try:
             st.session_state.sequence = fetch_sequence(selected["ID"])
-            for key in ("orfs", "selected_orf", "variant_result", "variant_sample"):
+            for key in ("orfs", "selected_orf", "variant_result", "variant_sample", "recommended_orf_choice"):
                 st.session_state.pop(key, None)
             st.success("DNA 서열을 가져왔습니다.")
         except requests.RequestException:
@@ -273,7 +330,11 @@ counts = base_counts(sequence)
 fig = px.bar(pd.DataFrame({"염기": counts.keys(), "개수": counts.values()}), x="염기", y="개수", title="DNA 염기 조성")
 st.plotly_chart(fig, use_container_width=True)
 with st.expander("GC 함량은 무엇을 의미하나요?"):
-    st.write("GC 함량은 전체 염기 중 G와 C가 차지하는 비율입니다. 서열의 특성을 비교하는 기본 지표로 활용됩니다.")
+    st.markdown("""**GC 함량(%) = (G의 개수 + C의 개수) ÷ 전체 염기 수 × 100**
+
+DNA에서 구아닌(G)과 사이토신(C)이 차지하는 비율을 의미합니다. G-C 염기쌍은 수소 결합 3개, A-T 염기쌍은 2개를 형성하므로, **다른 조건이 같다면 GC 함량이 높은 이중가닥 DNA는 일반적으로 녹는점(Tm)이 높아지는 경향**이 있습니다.
+
+GC 함량은 PCR 프라이머 설계, 서열 특성 비교, DNA의 열적 안정성 추정에 활용됩니다. 다만 **GC 함량만으로 DNA의 실제 안정성이나 유전자 발현량, 단백질 기능을 판단할 수는 없습니다.** DNA 길이·염기 배열·염 농도 등도 영향을 줍니다.""")
 
 # ③ ORF
 st.divider()
@@ -284,6 +345,7 @@ with st.expander("ORF란?"):
 if st.button("ORF 분석하기", type="primary", use_container_width=True):
     st.session_state.orfs = find_orfs(sequence)
     st.session_state.pop("selected_orf", None)
+    st.session_state.pop("recommended_orf_choice", None)
 
 selected_orf = None
 if "orfs" in st.session_state:
@@ -427,19 +489,51 @@ if "variant_result" in st.session_state:
         st.dataframe(df, use_container_width=True, hide_index=True)
         counts = df["유형"].value_counts().rename_axis("유형").reset_index(name="개수")
         st.plotly_chart(px.bar(counts, x="유형", y="개수", title="변이 유형"), use_container_width=True)
-        positions = pd.DataFrame({
-            "위치": df["기준 위치"], "값": 1, "유형": df["유형"]
-        })
-        fig = px.scatter(positions, x="위치", y="값", hover_name="유형", title="기준 DNA 내 변이 위치")
-        fig.update_yaxes(visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("변이 유형 설명: SNP / Deletion / Insertion"):
+            st.markdown("""- **SNP(단일 염기 치환):** 한 위치의 염기가 다른 염기로 바뀐 경우입니다. 코돈에 따라 아미노산이 유지되거나 달라질 수 있습니다.
+- **Deletion(결실):** 기준 서열에 있던 염기가 비교 서열에서 사라진 경우입니다.
+- **Insertion(삽입):** 기준 서열에는 없던 염기가 비교 서열에 추가된 경우입니다.
+
+코딩 영역에서 3의 배수가 아닌 염기가 삽입·결실되면 읽기 틀이 달라질 수 있습니다.""")
+        with st.expander("치환 유형 설명: Transition / Transversion"):
+            st.markdown("""- **Transition(전이):** 같은 계열 염기끼리의 치환입니다. 퓨린 A↔G 또는 피리미딘 C↔T.
+- **Transversion(전환):** 서로 다른 계열 간 치환입니다. A/G ↔ C/T.
+
+이 분류는 **염기의 화학적 계열**을 나타내며, 그 자체로 단백질 기능에 미치는 영향의 크기를 뜻하지는 않습니다.""")
+        st.plotly_chart(dna_variant_figure(r["start"], r["end"], variants), use_container_width=True)
+        st.caption("DNA 이중나선은 위치를 직관적으로 보여주기 위한 모식도입니다. 실제 분자 구조·나선 회전수는 반영하지 않습니다.")
     else:
         st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
 
     st.subheader("선택한 ORF의 단백질 영향")
-    effect, reason = analyze_orf_effect(
-        sequence, r, st.session_state.get("selected_orf")
-    )
+    orfs = st.session_state.get("orfs", [])
+    if not orfs:
+        st.info("먼저 ③ ORF 분석하기를 눌러 ORF 후보를 생성해주세요.")
+        chosen_orf = None
+    else:
+        recommended = recommend_orfs(orfs, r)
+        if recommended:
+            st.write("**비교 서열과 겹치는 ORF 추천**")
+            st.caption("전체 포함 여부 → ORF 정렬 비율 → 겹치는 염기 수 순으로 추천합니다. "
+                       "ORF가 실제 코딩 영역이라는 의미는 아닙니다.")
+            best = recommended[:30]
+            chosen_index = st.selectbox(
+                "단백질 영향 분석에 사용할 ORF",
+                [item["index"] for item in best],
+                format_func=lambda i: next(
+                    f"ORF {i+1} | {item['orf']['start']:,}–{item['orf']['end']:,} bp | "
+                    f"길이 {len(item['orf']['dna']):,} bp | 겹침 {item['fraction']:.1%} | "
+                    f"{'전체 정렬' if item['full'] else '부분 정렬'}"
+                    for item in best if item["index"] == i),
+                key="recommended_orf_choice"
+            )
+            chosen_orf = orfs[chosen_index]
+            if not next(item["full"] for item in best if item["index"] == chosen_index):
+                st.warning("선택한 ORF가 비교 서열에 완전히 포함되지 않아 단백질 영향 계산이 제한될 수 있습니다.")
+        else:
+            st.warning("현재 정렬 구간과 겹치는 ORF를 찾지 못했습니다.")
+            chosen_orf = None
+    effect, reason = analyze_orf_effect(sequence, r, chosen_orf)
     if reason:
         st.info(reason)
     else:
