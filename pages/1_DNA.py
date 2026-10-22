@@ -84,99 +84,136 @@ def find_orfs(seq):
     return orfs
 
 
-# -------------------- 서열 정렬 / 변이 분석 --------------------
+# -------------------- 서열 정렬 / 변이 영향 분석 --------------------
 def align_variants(reference, sample):
-    """긴 기준 서열에서 비교 서열과 가장 잘 맞는 구간을 찾아 SNP/삽입/결실을 반환합니다."""
+    """기준 DNA에서 비교 DNA와 유사한 구간을 찾아 정렬합니다(정방향)."""
     aligner = PairwiseAligner()
     aligner.mode = "local"
     aligner.match_score = 2
     aligner.mismatch_score = -1
-    aligner.open_gap_score = -3
+    aligner.open_gap_score = -4
     aligner.extend_gap_score = -1
-
     alignment = aligner.align(reference, sample)[0]
     coords = alignment.coordinates
-    variants, matches, columns = [], 0, 0
 
-    for k in range(len(coords[0]) - 1):
-        r1, r2 = int(coords[0][k]), int(coords[0][k+1])
-        s1, s2 = int(coords[1][k]), int(coords[1][k+1])
-        dr, ds = r2-r1, s2-s1
-
-        if dr and ds:  # 서로 대응되는 구간
-            n = min(dr, ds)
-            for j in range(n):
-                ref, alt = reference[r1+j], sample[s1+j]
+    variants, mapping, insertions = [], {}, {}
+    matches = columns = 0
+    for k in range(coords.shape[1] - 1):
+        r1, r2 = map(int, coords[0, k:k+2])
+        s1, s2 = map(int, coords[1, k:k+2])
+        if r2 > r1 and s2 > s1:
+            for ri, si in zip(range(r1, r2), range(s1, s2)):
+                ref, alt = reference[ri], sample[si]
+                mapping[ri] = alt
                 columns += 1
                 if ref == alt:
                     matches += 1
                 else:
-                    variants.append({"기준 위치": r1+j+1, "기준 염기": ref, "비교 염기": alt, "유형": "SNP"})
-
-        elif dr:  # 비교 서열에서 빠진 염기
-            columns += dr
-            for j in range(dr):
-                variants.append({"기준 위치": r1+j+1, "기준 염기": reference[r1+j], "비교 염기": "-", "유형": "Deletion"})
-
-        elif ds:  # 비교 서열에 추가된 염기
-            columns += ds
-            pos = r1 + 1
-            for j in range(ds):
-                variants.append({"기준 위치": pos, "기준 염기": "-", "비교 염기": sample[s1+j], "유형": "Insertion"})
-
-    ref_start, ref_end = int(coords[0][0])+1, int(coords[0][-1])
-    sample_covered = int(coords[1][-1] - coords[1][0])
-    identity = 100 * matches / columns if columns else 0
-    coverage = 100 * sample_covered / len(sample) if sample else 0
+                    variants.append({"기준 위치": ri+1, "기준 염기": ref,
+                                     "비교 염기": alt, "유형": "SNP"})
+        elif r2 > r1:
+            for ri in range(r1, r2):
+                mapping[ri] = ""
+                columns += 1
+                variants.append({"기준 위치": ri+1, "기준 염기": reference[ri],
+                                 "비교 염기": "-", "유형": "Deletion"})
+        elif s2 > s1:
+            insertion = sample[s1:s2]
+            insertions[r1] = insertions.get(r1, "") + insertion
+            columns += len(insertion)
+            variants.append({"기준 위치": r1, "기준 염기": "-",
+                             "비교 염기": insertion, "유형": "Insertion"})
 
     return {
-        "variants": variants,
-        "start": ref_start,
-        "end": ref_end,
-        "identity": identity,
-        "coverage": coverage,
-        "score": alignment.score
+        "variants": variants, "mapping": mapping, "insertions": insertions,
+        "start": int(coords[0, 0])+1, "end": int(coords[0, -1]),
+        "identity": 100*matches/columns if columns else 0,
+        "coverage": 100*(int(coords[1, -1])-int(coords[1, 0]))/len(sample),
+        "aligned_bases": int(coords[1, -1])-int(coords[1, 0]),
     }
 
 
 def substitution_type(ref, alt):
     if ref == "-" or alt == "-":
         return "-"
-    return "Transition" if (ref, alt) in {("A","G"),("G","A"),("C","T"),("T","C")} else "Transversion"
+    return "Transition" if (ref, alt) in {
+        ("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")
+    } else "Transversion"
 
 
-def add_orf_effect(variant, reference, selected_orf):
-    """SNP가 선택한 ORF 안에 있을 때만 코돈/아미노산 변화를 계산합니다."""
-    if variant["유형"] != "SNP" or not selected_orf:
-        return variant
+def analyze_orf_effect(reference, result, orf):
+    """선택한 ORF 전체가 정렬되었을 때만 단백질 수준의 영향을 계산합니다."""
+    if not orf:
+        return None, "ORF 분석에서 ORF를 선택하면 단백질 영향도 확인할 수 있습니다."
 
-    pos = variant["기준 위치"]
-    if not (selected_orf["start"] <= pos <= selected_orf["end"]):
-        return variant
+    start, end = orf["start"]-1, orf["end"]  # Python 인덱스
+    mapping, insertions = result["mapping"], result["insertions"]
+    if any(i not in mapping for i in range(start, end)):
+        return None, "선택한 ORF 전체가 비교 서열과 정렬되지 않아 단백질 영향을 확정할 수 없습니다."
 
-    offset = pos - selected_orf["start"]
-    codon_start = selected_orf["start"] - 1 + (offset // 3) * 3
-    ref_codon = reference[codon_start:codon_start+3]
-    alt_codon = list(ref_codon)
-    alt_codon[offset % 3] = variant["비교 염기"]
-    alt_codon = "".join(alt_codon)
-    ref_aa, alt_aa = codon_table.get(ref_codon, "?"), codon_table.get(alt_codon, "?")
+    ref_dna = reference[start:end]
+    pieces = []
+    for i in range(start, end):
+        # 삽입 위치는 기준 염기의 바로 앞(0-based 경계)
+        pieces.append(insertions.get(i, "") if i > start else "")
+        pieces.append(mapping[i])
+    alt_dna = "".join(pieces)
 
-    if ref_aa == alt_aa:
-        effect = "Synonymous"
-    elif alt_aa == "*":
-        effect = "Nonsense"
-    else:
-        effect = "Missense"
+    relevant = [v for v in result["variants"]
+                if (start+1 <= v["기준 위치"] <= end if v["유형"] != "Insertion"
+                    else start < v["기준 위치"] < end)]
+    if not relevant:
+        return {"rows": [], "ref_protein": translate(ref_dna),
+                "alt_protein": translate(alt_dna), "summary": "선택한 ORF에서 변이가 발견되지 않았습니다."}, None
 
-    return {**variant, "기준 코돈": ref_codon, "변이 코돈": alt_codon,
-            "기준 아미노산": ref_aa, "변이 아미노산": alt_aa, "영향": effect}
+    indels = [v for v in relevant if v["유형"] != "SNP"]
+    net_change = len(alt_dna)-len(ref_dna)
+    if indels:
+        label = ("Frameshift 가능성 (삽입·결실의 순길이가 3의 배수가 아님)"
+                 if net_change % 3 else
+                 "In-frame 삽입·결실 가능성 (순길이가 3의 배수)")
+        return {"rows": [], "ref_protein": translate(ref_dna),
+                "alt_protein": translate(alt_dna), "summary": label,
+                "indels": True}, None
+
+    # 한 코돈에 SNP가 여러 개 있어도 최종 변이 코돈으로 함께 평가
+    rows = []
+    for codon_index in sorted({(v["기준 위치"]-1-start)//3 for v in relevant}):
+        j = codon_index*3
+        before, after = ref_dna[j:j+3], alt_dna[j:j+3]
+        aa1, aa2 = translate(before), translate(after)
+        if aa1 == aa2:
+            effect = "Synonymous (아미노산 유지)"
+        elif aa2 == "*" and aa1 != "*":
+            effect = "Nonsense (조기 종결 코돈)"
+        elif aa1 == "*" and aa2 != "*":
+            effect = "Stop-loss (종결 코돈 소실)"
+        else:
+            effect = "Missense (아미노산 치환)"
+        rows.append({"코돈 위치(ORF 기준)": codon_index+1,
+                     "기준 코돈": before, "변이 코돈": after,
+                     "기준 아미노산": aa1, "변이 아미노산": aa2,
+                     "예측 영향": effect})
+    return {"rows": rows, "ref_protein": translate(ref_dna),
+            "alt_protein": translate(alt_dna),
+            "summary": "선택한 ORF의 코돈·아미노산 변화를 분석했습니다."}, None
 
 
 def save_alignment(sample):
-    result = align_variants(st.session_state.sequence, sample)
-    st.session_state.variant_sample = sample
-    st.session_state.variant_result = result
+    reference = st.session_state.sequence
+    # 로컬 정렬은 큰 서열에서 느리거나 메모리를 많이 사용할 수 있음
+    if len(reference) > 30000 or len(sample) > 10000:
+        st.warning("현재 버전은 기준 30,000 bp, 비교 10,000 bp 이하만 지원합니다.")
+        return
+    try:
+        result = align_variants(reference, sample)
+        if result["aligned_bases"] < 12 or result["coverage"] < 50:
+            st.warning("유사한 구간이 너무 짧거나 비교 서열의 절반 미만만 정렬되었습니다. 결과를 저장하지 않았습니다.")
+            return
+        st.session_state.variant_result = result
+        st.session_state.variant_sample = sample
+    except (ValueError, IndexError, MemoryError) as e:
+        st.error(f"서열 정렬에 실패했습니다: {e}")
 
 
 # ==================== 화면 ====================
@@ -213,7 +250,7 @@ if "ncbi_results" in st.session_state:
     if st.button("이 서열 분석하기", use_container_width=True):
         try:
             st.session_state.sequence = fetch_sequence(selected["ID"])
-            for key in ("orfs", "variant_result", "variant_sample"):
+            for key in ("orfs", "selected_orf", "variant_result", "variant_sample"):
                 st.session_state.pop(key, None)
             st.success("DNA 서열을 가져왔습니다.")
         except requests.RequestException:
@@ -246,6 +283,7 @@ with st.expander("ORF란?"):
 
 if st.button("ORF 분석하기", type="primary", use_container_width=True):
     st.session_state.orfs = find_orfs(sequence)
+    st.session_state.pop("selected_orf", None)
 
 selected_orf = None
 if "orfs" in st.session_state:
@@ -277,14 +315,15 @@ else:
 
 # ④ 변이 분석
 st.divider()
-st.subheader("④ DNA 변이 분석")
-st.write("비교 서열이 더 짧거나 길어도 기준 DNA에서 가장 유사한 구간을 찾아 정렬한 뒤 변이를 분석합니다.")
+st.subheader("④ DNA 변이 및 단백질 영향 분석")
+st.write("기준 DNA에서 비교 서열과 가장 유사한 영역을 정렬하고, 선택한 ORF의 코돈·아미노산 변화를 살펴봅니다.")
+st.caption("정방향 국소 정렬을 사용합니다. 유사성이 낮거나 역방향인 서열은 별도 확인이 필요합니다.")
 
-source = st.radio("비교 데이터", ["직접 DNA 입력", "NCBI 비교 서열", "ClinVar 알려진 변이"], horizontal=True)
+source = st.radio("비교 데이터", ["직접 DNA 입력", "NCBI 비교 서열"], horizontal=True)
 
 if source == "직접 DNA 입력":
     sample_text = st.text_area("비교할 DNA 서열", height=130, placeholder="ATGCGT...")
-    if st.button("변이 분석하기", type="primary", use_container_width=True, key="manual_align"):
+    if st.button("변이 분석하기", type="primary", use_container_width=True):
         sample = clean_dna(sample_text)
         if not sample:
             st.warning("비교할 DNA를 입력해주세요.")
@@ -293,93 +332,93 @@ if source == "직접 DNA 입력":
         else:
             save_alignment(sample)
 
-elif source == "NCBI 비교 서열":
+else:
     query = st.text_input("유전자명, accession 또는 검색어", placeholder="예: TP53 Homo sapiens")
     if st.button("NCBI 비교 서열 검색", use_container_width=True):
-        try:
-            ids, total = search_db("nuccore", query, 10)
-            rows = summaries("nuccore", ids)
-            st.session_state.compare_total = total
-            st.session_state.compare_results = [
-                {"ID": i, "제목": r.get("title", "제목 없음"), "Accession": r.get("accessionversion", ""), "길이": r.get("slen", 0)}
-                for i, r in zip(ids, rows)
-            ]
-        except requests.RequestException:
-            st.error("NCBI 검색에 실패했습니다.")
+        if not query.strip():
+            st.warning("검색어를 입력해주세요.")
+        else:
+            try:
+                ids, total = search_db("nuccore", query, 10)
+                rows = summaries("nuccore", ids)
+                st.session_state.compare_total = total
+                st.session_state.compare_results = [
+                    {"ID": i, "제목": r.get("title", "제목 없음"),
+                     "Accession": r.get("accessionversion", ""),
+                     "길이": r.get("slen", 0)}
+                    for i, r in zip(ids, rows)
+                ]
+            except (requests.RequestException, KeyError, ValueError):
+                st.error("NCBI 검색에 실패했습니다.")
 
     if "compare_results" in st.session_state:
         rows = st.session_state.compare_results
         st.write(f"검색 결과: 총 {st.session_state.get('compare_total', len(rows)):,}개 (상위 {len(rows)}개 표시)")
-        choice = st.selectbox("비교할 서열", rows, format_func=lambda x: f"{x['Accession']} | {x['제목']} | {x['길이']:,} bp")
-        if st.button("선택한 서열 변이 분석하기", type="primary", use_container_width=True):
-            try:
-                save_alignment(fetch_sequence(choice["ID"]))
-            except requests.RequestException:
-                st.error("비교 서열을 가져오지 못했습니다.")
+        if rows:
+            choice = st.selectbox(
+                "비교할 서열", rows,
+                format_func=lambda x: f"{x['Accession']} | {x['제목']} | {x['길이']} bp"
+            )
+            if st.button("선택한 서열 변이 분석하기", type="primary", use_container_width=True):
+                try:
+                    sample = fetch_sequence(choice["ID"])
+                    if not sample or any(b not in "ATGC" for b in sample):
+                        st.error("선택한 기록에 A/T/G/C 이외의 문자가 있어 분석할 수 없습니다.")
+                    else:
+                        save_alignment(sample)
+                except requests.RequestException:
+                    st.error("비교 서열을 가져오지 못했습니다.")
+        else:
+            st.info("검색 결과가 없습니다.")
 
-else:  # ClinVar
-    query = st.text_input("유전자명 또는 변이", placeholder="예: BRCA1 또는 TP53")
-    if st.button("ClinVar 검색", use_container_width=True):
-        try:
-            ids, total = search_db("clinvar", query, 10)
-            rows = summaries("clinvar", ids)
-            st.session_state.clinvar_total = total
-            st.session_state.clinvar_results = [{"ID": i, **r} for i, r in zip(ids, rows)]
-        except requests.RequestException:
-            st.error("ClinVar 검색에 실패했습니다.")
-
-    if "clinvar_results" in st.session_state:
-        rows = st.session_state.clinvar_results
-        st.write(f"검색 결과: 총 {st.session_state.get('clinvar_total', len(rows)):,}개 (상위 {len(rows)}개 표시)")
-        choice = st.selectbox("분석할 ClinVar 변이", rows, format_func=lambda x: f"{x['ID']} | {x.get('title', '정보 없음')}")
-
-        if st.button("선택한 변이 분석하기", type="primary", use_container_width=True):
-            st.session_state.selected_clinvar = choice
-
-    if "selected_clinvar" in st.session_state:
-        v = st.session_state.selected_clinvar
-        classification = v.get("germline_classification", {})
-        if not isinstance(classification, dict):
-            classification = {}
-        genes = v.get("genes", [])
-        gene_text = ", ".join(g.get("symbol", "") for g in genes if isinstance(g, dict)) if isinstance(genes, list) else "정보 없음"
-
-        st.subheader("ClinVar 변이 분석 결과")
-        st.write("**변이:**", v.get("title", "정보 없음"))
-        st.write("**유전자:**", gene_text or "정보 없음")
-        st.write("**변이 유형:**", v.get("variant_type", v.get("obj_type", "정보 없음")))
-        st.write("**임상적 분류:**", classification.get("description", "정보 없음"))
-        st.caption("ClinVar는 알려진 변이 기록을 조회하는 기능이며, 전체 비교 DNA 서열을 제공하는 기능과는 다릅니다.")
-
-# 정렬 결과는 직접 입력/NCBI 비교에서 표시
-if source != "ClinVar 알려진 변이" and "variant_result" in st.session_state:
+if "variant_result" in st.session_state:
     r = st.session_state.variant_result
     variants = r["variants"]
-
     st.divider()
-    st.subheader("변이 분석 결과")
+    st.subheader("서열 정렬 결과")
     c1, c2, c3 = st.columns(3)
-    c1.metric("가장 유사한 기준 구간", f"{r['start']:,}–{r['end']:,} bp")
-    c2.metric("서열 일치도", f"{r['identity']:.2f}%")
-    c3.metric("비교 서열 정렬 범위", f"{r['coverage']:.2f}%")
+    c1.metric("기준 DNA의 유사 구간", f"{r['start']:,}–{r['end']:,} bp")
+    c2.metric("정렬 구간 일치도", f"{r['identity']:.2f}%")
+    c3.metric("비교 서열 정렬 비율", f"{r['coverage']:.2f}%")
+    st.caption("일치도는 정렬된 열 기준이며, 정렬되지 않은 비교 서열의 끝부분은 변이로 집계하지 않습니다.")
 
-    if not variants:
-        st.success("정렬된 구간에서 변이가 발견되지 않았습니다.")
-    else:
-        selected_orf = st.session_state.get("selected_orf")
-        detailed = []
-        for v in variants:
-            item = {**v, "치환 유형": substitution_type(v["기준 염기"], v["비교 염기"])}
-            detailed.append(add_orf_effect(item, sequence, selected_orf))
-
-        df = pd.DataFrame(detailed)
-        st.write(f"총 {len(df)}개의 차이를 찾았습니다.")
+    if variants:
+        df = pd.DataFrame([
+            {**v, "치환 유형": substitution_type(v["기준 염기"], v["비교 염기"])}
+            for v in variants
+        ])
+        st.write(f"정렬된 영역에서 총 {len(df)}개 변이 항목을 찾았습니다.")
         st.dataframe(df, use_container_width=True, hide_index=True)
-
         counts = df["유형"].value_counts().rename_axis("유형").reset_index(name="개수")
         st.plotly_chart(px.bar(counts, x="유형", y="개수", title="변이 유형"), use_container_width=True)
-
-        positions = pd.DataFrame({"위치": [v["기준 위치"] for v in variants], "값": 1, "유형": [v["유형"] for v in variants]})
+        positions = pd.DataFrame({
+            "위치": df["기준 위치"], "값": 1, "유형": df["유형"]
+        })
         fig = px.scatter(positions, x="위치", y="값", hover_name="유형", title="기준 DNA 내 변이 위치")
         fig.update_yaxes(visible=False)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
+
+    st.subheader("선택한 ORF의 단백질 영향")
+    effect, reason = analyze_orf_effect(
+        sequence, r, st.session_state.get("selected_orf")
+    )
+    if reason:
+        st.info(reason)
+    else:
+        st.write(effect["summary"])
+        if effect["rows"]:
+            st.dataframe(pd.DataFrame(effect["rows"]), use_container_width=True, hide_index=True)
+        if effect["ref_protein"] != effect["alt_protein"]:
+            with st.expander("변이 전·후 예측 아미노산 서열"):
+                st.write("기준 아미노산 서열")
+                st.code(effect["ref_protein"])
+                st.write("비교 아미노산 서열")
+                st.code(effect["alt_protein"])
+        if effect.get("indels"):
+            st.warning("삽입·결실이 포함되어 코돈별 SNP 해석 대신 전체 ORF 번역 결과를 표시합니다. "
+                       "프레임시프트 여부는 삽입·결실의 위치와 길이를 추가로 확인해야 합니다.")
+    st.caption("이 분석은 선택한 ORF를 코딩 영역으로 가정한 교육용 예측입니다. "
+               "실제 단백질 기능 변화나 질병 유발 여부를 판정하지 않습니다. "
+               "ClinVar 연동은 참조 서열과 변이 좌표의 정확한 매칭이 필요해 이번 버전에서 제외했습니다.")
