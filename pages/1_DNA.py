@@ -257,19 +257,28 @@ def dna_variant_figure(reference, start, end, variants):
         xs.extend([pos,pos,None]);ys.extend([-y,y,None])
     fig.add_trace(go.Scattergl(x=xs,y=ys,mode="lines",showlegend=False,
                                line=dict(color="#B6BBC2",width=2),hoverinfo="skip"))
-    # 한 그래프 안에 실제 염기 글자를 배치: 축소 상태에서는 밀집, 확대하면 읽힘.
-    fig.add_trace(go.Scatter(x=bp,y=np.full(len(bp),1.45),mode="text",
-                             text=[reference[int(i)-1] for i in bp],textfont=dict(size=11,color=strand_a),
-                             showlegend=False,hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=bp,y=np.full(len(bp),-1.45),mode="text",
-                             text=[complement.get(reference[int(i)-1],"?") for i in bp],
-                             textfont=dict(size=11,color="#A98800"),showlegend=False,hoverinfo="skip"))
-    fig.update_layout(height=480,dragmode="zoom",hovermode="closest",
-                      margin=dict(l=15,r=15,t=35,b=40),
-                      legend=dict(orientation="h",y=1.08),
-                      xaxis=dict(title="기준 DNA 위치 (bp)",rangeslider=dict(visible=True,thickness=.10)),
-                      yaxis=dict(visible=False,range=[-1.9,1.9]),
-                      uirevision="dna-zoom")
+    # 위·아래에 나열된 염기 문자 제거. 염기 정보는 각 위치의 hover로 확인.
+    fig.add_trace(go.Scattergl(
+        x=bp, y=np.zeros(len(bp)), mode="markers",
+        marker=dict(size=3, color="rgba(120,125,135,0.28)"),
+        customdata=[[reference[int(i)-1], complement.get(reference[int(i)-1], "?")] for i in bp],
+        hovertemplate="기준 위치 %{x} bp<br>%{customdata[0]}–%{customdata[1]}<extra></extra>",
+        showlegend=False))
+    # 드래그한 사각형의 가로·세로 범위를 모두 확대하도록 두 축의 자동 고정을 해제.
+    # 처음에는 나선이 과도하게 뭉치지 않도록 약 65 bp가 보이게 설정한다.
+    initial_end = min(end, start+64)
+    fig.update_layout(
+        height=490, dragmode="zoom", hovermode="closest",
+        margin=dict(l=15, r=15, t=40, b=50),
+        legend=dict(orientation="h", y=1.10),
+        xaxis=dict(title="기준 DNA 위치 (bp)", range=[start, initial_end],
+                   fixedrange=False, rangeslider=dict(visible=False)),
+        yaxis=dict(visible=False, range=[-1.8, 1.8], fixedrange=False,
+                   scaleanchor="x", scaleratio=1),
+        uirevision="dna-2d-zoom")
+    # x/y 실제 픽셀 비율을 강제로 고정하면 나선이 납작해질 수 있으므로
+    # scaleanchor는 사용하지 않고 두 축을 자유롭게 확대한다.
+    fig.update_yaxes(scaleanchor=None)
     return fig
 
 
@@ -519,9 +528,9 @@ if "variant_result" in st.session_state:
 
 이 분류는 **염기의 화학적 계열**을 나타내며, 그 자체로 단백질 기능에 미치는 영향의 크기를 뜻하지는 않습니다.""")
         st.write("**DNA 이중나선과 변이 위치**")
-        st.caption("**그래프 하나**에서 드래그하여 확대하고, 더블클릭하여 축소할 수 있습니다. "
-                   "아래 범위 슬라이더로도 같은 그래프의 확대 범위를 조절할 수 있습니다. "
-                   "확대하면 각 염기쌍(A–T, G–C)이 보입니다.")
+        st.caption("그래프 안에서 **대각선으로 드래그해 사각형 영역을 선택**하면 가로·세로가 함께 확대됩니다. "
+                   "위쪽 도구막대의 확대/축소·이동 기능도 사용할 수 있고, 더블클릭하면 초기 화면으로 돌아옵니다. "
+                   "염기쌍은 마우스를 올려 확인할 수 있습니다.")
         left, right = r["start"], r["end"]
         if right-left+1 > 1500:
             st.info("화면 성능을 위해 변이 주변의 연속된 1,500 bp를 표시합니다. "
@@ -529,7 +538,7 @@ if "variant_result" in st.session_state:
         fig = dna_variant_figure(sequence,left,right,variants)
         st.plotly_chart(fig,use_container_width=True,
                         config={"scrollZoom":True,"displayModeBar":True})
-        st.caption("한 그래프에서 확대/축소합니다. 실제 염기쌍 간격과 B형 DNA의 평균 약 10.5 bp/회전을 반영한 교육용 모식도입니다. "
+        st.caption("하나의 그래프에서 가로·세로를 함께 확대/축소합니다. B형 DNA의 평균 약 10.5 bp/회전을 반영한 교육용 모식도입니다. "
                    "빨강=SNP, 보라=결실, 초록=삽입. 3차원 원자 구조는 아닙니다.")
     else:
         st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
