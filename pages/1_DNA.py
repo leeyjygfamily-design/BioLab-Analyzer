@@ -220,47 +220,40 @@ def recommend_orfs(orfs, result):
     return ranked
 
 
-def dna_variant_figure(reference, start, variants):
-    """10개 염기쌍을 실제 염기 문자와 함께 보여주는 이중나선 모식도."""
-    complement = {"A": "T", "T": "A", "G": "C", "C": "G"}
-    bases = reference[start-1:start+9]
-    x = np.arange(len(bases))
-    theta = np.linspace(0, 2*np.pi, len(bases))
-    y1, y2 = np.sin(theta), -np.sin(theta)
+def dna_variant_figure(start, end, variants):
+    """정렬된 DNA 구간을 이중나선 모식도로 표현합니다. 실제 3차원 구조는 아닙니다."""
+    span = max(1, end - start)
+    x = np.linspace(start, end, 500)
+    theta = 4 * np.pi * (x - start) / span
     fig = go.Figure()
-    for i, base in enumerate(bases):
-        pos = start+i
-        hits = [v for v in variants if v["기준 위치"] == pos]
-        color = {"SNP":"#D64545", "Insertion":"#159A75",
-                 "Deletion":"#8053BC"}.get(hits[0]["유형"], "#A3ADB8") if hits else "#A3ADB8"
+    for phase, color, label in [(0, "#2979B8", "DNA 가닥 1"),
+                                (np.pi, "#D18A35", "DNA 가닥 2")]:
+        fig.add_trace(go.Scatter(x=x, y=np.sin(theta + phase), mode="lines",
+                                 line=dict(color=color, width=3), name=label,
+                                 hoverinfo="skip"))
+    for xi in np.linspace(start, end, 32):
+        yy = np.sin(4 * np.pi * (xi - start) / span)
+        fig.add_shape(type="line", x0=xi, x1=xi, y0=-yy, y1=yy,
+                      line=dict(color="rgba(130,130,130,0.35)", width=1))
+    colors = {"SNP": "#DC3545", "Deletion": "#7B4DC4", "Insertion": "#159A75"}
+    for typ in ("SNP", "Deletion", "Insertion"):
+        group = [v for v in variants if v["유형"] == typ]
+        if not group:
+            continue
         fig.add_trace(go.Scatter(
-            x=[i,i], y=[y1[i],y2[i]], mode="lines",
-            line=dict(color=color,width=7 if hits else 4),
-            hovertemplate=f"기준 위치 {pos} bp<br>{base}–{complement.get(base,'?')}" +
-            (f"<br>{hits[0]['유형']}: {hits[0]['기준 염기']} → {hits[0]['비교 염기']}" if hits else "") +
-            "<extra></extra>", showlegend=False))
-        fig.add_annotation(x=i,y=y1[i]+(.22 if y1[i]>=0 else -.22),text=base,
-                           showarrow=False,font=dict(size=12,color="#2665A8"))
-        fig.add_annotation(x=i,y=y2[i]+(.22 if y2[i]>=0 else -.22),
-                           text=complement.get(base,"?"),showarrow=False,
-                           font=dict(size=12,color="#BA792C"))
-        if hits:
-            fig.add_annotation(x=i,y=1.62,text=" / ".join(v["유형"] for v in hits),
-                               showarrow=False,font=dict(size=10,color=color))
-    fine=np.linspace(0,max(0,len(bases)-1),250)
-    wave=np.sin(2*np.pi*fine/9) if len(bases)>1 else np.zeros_like(fine)
-    fig.add_trace(go.Scatter(x=fine,y=wave,mode="lines",
-                             line=dict(color="#2665A8",width=4),name="가닥 1",
-                             hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=fine,y=-wave,mode="lines",
-                             line=dict(color="#BA792C",width=4),name="가닥 2",
-                             hoverinfo="skip"))
-    fig.update_layout(
-        title=f"기준 DNA {start}–{start+len(bases)-1} bp (10 bp 창)",
-        xaxis=dict(tickmode="array",tickvals=list(x),
-                   ticktext=[str(start+i) for i in x],title="기준 DNA 위치 (bp)"),
-        yaxis=dict(visible=False,range=[-2.0,2.0]),height=370,
-        margin=dict(l=10,r=10,t=55,b=30),showlegend=False)
+            x=[v["기준 위치"] for v in group], y=[0]*len(group),
+            mode="markers", name=typ,
+            marker=dict(size=12, color=colors[typ], symbol="diamond",
+                        line=dict(color="white", width=1)),
+            customdata=[[v["기준 염기"], v["비교 염기"]] for v in group],
+            hovertemplate="위치 %{x}<br>기준 %{customdata[0]} → 비교 %{customdata[1]}<extra>"+typ+"</extra>"
+        ))
+    fig.update_layout(title="DNA 이중나선 모식도와 변이 위치", xaxis_title="기준 DNA 위치 (bp)",
+                      yaxis=dict(visible=False, range=[-1.35, 1.35]),
+                      height=350, legend=dict(orientation="h", y=-0.22),
+                      margin=dict(l=10, r=10, t=55, b=70))
+    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.10))
+    fig.update_layout(dragmode="zoom")
     return fig
 
 
@@ -509,24 +502,11 @@ if "variant_result" in st.session_state:
 - **Transversion(전환):** 서로 다른 계열 간 치환입니다. A/G ↔ C/T.
 
 이 분류는 **염기의 화학적 계열**을 나타내며, 그 자체로 단백질 기능에 미치는 영향의 크기를 뜻하지는 않습니다.""")
-        st.write("**DNA 이중나선에서 변이 위치 살펴보기 (10 bp씩)**")
-        st.caption("변이가 발생한 위치를 선택하면 주변 10개 염기쌍을 확대합니다.")
-        variant_positions = sorted(set(max(1, min(len(sequence)-9, v["기준 위치"]-4))
-                                       for v in variants))
-        choices = ["직접 위치 지정"] + [f"{v['기준 위치']} bp · {v['유형']}" for v in variants[:100]]
-        selection = st.selectbox("확대할 변이", range(len(choices)),
-                                 format_func=lambda i: choices[i])
-        default_start = variant_positions[0] if variant_positions else r["start"]
-        if selection:
-            default_start = max(1, variants[selection-1]["기준 위치"]-4)
-        window_start = st.number_input("10 bp 창 시작 위치", min_value=1,
-                                        max_value=max(1,len(sequence)-9),
-                                        value=min(default_start,max(1,len(sequence)-9)),
-                                        key=f"dna_window_{selection}")
-        st.plotly_chart(dna_variant_figure(sequence,int(window_start),variants),
-                        use_container_width=True)
-        st.caption("A–T 및 G–C 상보적 염기쌍을 표시한 교육용 모식도입니다. "
-                   "10 bp는 보기 편하도록 선택한 창 크기이며, 실제 DNA 나선은 평균 약 10.5 bp/회전입니다.")
+        st.write("**전체 DNA 이중나선 모식도와 변이 위치**")
+        st.caption("전체 정렬 구간에서 변이 위치를 확인하고, 그래프를 드래그하거나 아래 범위 슬라이더로 확대할 수 있습니다.")
+        fig = dna_variant_figure(r["start"], r["end"], variants)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("빨강=SNP, 보라=Deletion, 초록=Insertion. 이중나선은 실제 염기쌍 개수나 입체구조를 그대로 재현한 그림이 아닌 위치 모식도입니다.")
     else:
         st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
 
