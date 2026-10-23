@@ -220,40 +220,56 @@ def recommend_orfs(orfs, result):
     return ranked
 
 
-def dna_variant_figure(start, end, variants):
-    """정렬된 DNA 구간을 이중나선 모식도로 표현합니다. 실제 3차원 구조는 아닙니다."""
-    span = max(1, end - start)
-    x = np.linspace(start, end, 500)
-    theta = 4 * np.pi * (x - start) / span
+def dna_variant_figure(reference, start, end, variants):
+    """하나의 Plotly 그래프: 드래그/휠로 확대하면 같은 DNA의 염기쌍을 자세히 확인."""
+    import math
+    # 실제 bp 단위로 그리되 브라우저 성능을 위해 최대 1500 bp만 렌더링
+    # 길면 첫 변이를 중심으로 연속 구간을 선택한다.
+    if end-start+1 > 1500:
+        center = next((v["기준 위치"] for v in variants if start <= v["기준 위치"] <= end), (start+end)//2)
+        start = max(start, min(end-1499, center-750))
+        end = start+1499
+    strand_a, strand_b = "#1499D2", "#E0B900"
+    colors = {"SNP":"#E44B55", "Deletion":"#8857CE", "Insertion":"#159A75"}
+    complement = {"A":"T","T":"A","G":"C","C":"G"}
+    bp = np.arange(start,end+1)
+    theta = 2*np.pi*(bp-start)/10.5
+    wave = np.sin(theta)
+    smooth = np.linspace(start,end,max(500,len(bp)*4))
+    smooth_wave = np.sin(2*np.pi*(smooth-start)/10.5)
     fig = go.Figure()
-    for phase, color, label in [(0, "#2979B8", "DNA 가닥 1"),
-                                (np.pi, "#D18A35", "DNA 가닥 2")]:
-        fig.add_trace(go.Scatter(x=x, y=np.sin(theta + phase), mode="lines",
-                                 line=dict(color=color, width=3), name=label,
-                                 hoverinfo="skip"))
-    for xi in np.linspace(start, end, 32):
-        yy = np.sin(4 * np.pi * (xi - start) / span)
-        fig.add_shape(type="line", x0=xi, x1=xi, y0=-yy, y1=yy,
-                      line=dict(color="rgba(130,130,130,0.35)", width=1))
-    colors = {"SNP": "#DC3545", "Deletion": "#7B4DC4", "Insertion": "#159A75"}
-    for typ in ("SNP", "Deletion", "Insertion"):
-        group = [v for v in variants if v["유형"] == typ]
-        if not group:
-            continue
-        fig.add_trace(go.Scatter(
-            x=[v["기준 위치"] for v in group], y=[0]*len(group),
-            mode="markers", name=typ,
-            marker=dict(size=12, color=colors[typ], symbol="diamond",
-                        line=dict(color="white", width=1)),
-            customdata=[[v["기준 염기"], v["비교 염기"]] for v in group],
-            hovertemplate="위치 %{x}<br>기준 %{customdata[0]} → 비교 %{customdata[1]}<extra>"+typ+"</extra>"
-        ))
-    fig.update_layout(title="DNA 이중나선 모식도와 변이 위치", xaxis_title="기준 DNA 위치 (bp)",
-                      yaxis=dict(visible=False, range=[-1.35, 1.35]),
-                      height=350, legend=dict(orientation="h", y=-0.22),
-                      margin=dict(l=10, r=10, t=55, b=70))
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.10))
-    fig.update_layout(dragmode="zoom")
+    for yy,color,name in ((smooth_wave,strand_a,"DNA 가닥 1"),(-smooth_wave,strand_b,"DNA 가닥 2")):
+        fig.add_trace(go.Scattergl(x=smooth,y=yy,mode="lines",name=name,
+                                 line=dict(color=color,width=3),hoverinfo="skip"))
+    by_pos={}
+    for v in variants:
+        by_pos.setdefault(v["기준 위치"],[]).append(v)
+    for typ,color in colors.items():
+        positions=[int(x) for x in bp if any(v["유형"]==typ for v in by_pos.get(int(x),[]))]
+        if positions:
+            fig.add_trace(go.Scatter(x=positions,y=[0]*len(positions),mode="markers",
+                                     name=typ,marker=dict(color=color,size=10,symbol="diamond"),
+                                     customdata=["; ".join(f"{v['기준 염기']}→{v['비교 염기']}" for v in by_pos[pos] if v['유형']==typ) for pos in positions],
+                                     hovertemplate="위치 %{x} bp<br>"+typ+": %{customdata}<extra></extra>"))
+    # 실제 염기쌍 간격의 가로 연결선. 확대 시 염기 글자가 자연스럽게 구분된다.
+    xs=[];ys=[]
+    for pos,y in zip(bp,wave):
+        xs.extend([pos,pos,None]);ys.extend([-y,y,None])
+    fig.add_trace(go.Scattergl(x=xs,y=ys,mode="lines",showlegend=False,
+                               line=dict(color="#B6BBC2",width=2),hoverinfo="skip"))
+    # 한 그래프 안에 실제 염기 글자를 배치: 축소 상태에서는 밀집, 확대하면 읽힘.
+    fig.add_trace(go.Scatter(x=bp,y=np.full(len(bp),1.45),mode="text",
+                             text=[reference[int(i)-1] for i in bp],textfont=dict(size=11,color=strand_a),
+                             showlegend=False,hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=bp,y=np.full(len(bp),-1.45),mode="text",
+                             text=[complement.get(reference[int(i)-1],"?") for i in bp],
+                             textfont=dict(size=11,color="#A98800"),showlegend=False,hoverinfo="skip"))
+    fig.update_layout(height=480,dragmode="zoom",hovermode="closest",
+                      margin=dict(l=15,r=15,t=35,b=40),
+                      legend=dict(orientation="h",y=1.08),
+                      xaxis=dict(title="기준 DNA 위치 (bp)",rangeslider=dict(visible=True,thickness=.10)),
+                      yaxis=dict(visible=False,range=[-1.9,1.9]),
+                      uirevision="dna-zoom")
     return fig
 
 
@@ -502,11 +518,19 @@ if "variant_result" in st.session_state:
 - **Transversion(전환):** 서로 다른 계열 간 치환입니다. A/G ↔ C/T.
 
 이 분류는 **염기의 화학적 계열**을 나타내며, 그 자체로 단백질 기능에 미치는 영향의 크기를 뜻하지는 않습니다.""")
-        st.write("**전체 DNA 이중나선 모식도와 변이 위치**")
-        st.caption("전체 정렬 구간에서 변이 위치를 확인하고, 그래프를 드래그하거나 아래 범위 슬라이더로 확대할 수 있습니다.")
-        fig = dna_variant_figure(r["start"], r["end"], variants)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("빨강=SNP, 보라=Deletion, 초록=Insertion. 이중나선은 실제 염기쌍 개수나 입체구조를 그대로 재현한 그림이 아닌 위치 모식도입니다.")
+        st.write("**DNA 이중나선과 변이 위치**")
+        st.caption("**그래프 하나**에서 드래그하여 확대하고, 더블클릭하여 축소할 수 있습니다. "
+                   "아래 범위 슬라이더로도 같은 그래프의 확대 범위를 조절할 수 있습니다. "
+                   "확대하면 각 염기쌍(A–T, G–C)이 보입니다.")
+        left, right = r["start"], r["end"]
+        if right-left+1 > 1500:
+            st.info("화면 성능을 위해 변이 주변의 연속된 1,500 bp를 표시합니다. "
+                    "전체 변이 목록은 위 표에서 확인할 수 있습니다.")
+        fig = dna_variant_figure(sequence,left,right,variants)
+        st.plotly_chart(fig,use_container_width=True,
+                        config={"scrollZoom":True,"displayModeBar":True})
+        st.caption("한 그래프에서 확대/축소합니다. 실제 염기쌍 간격과 B형 DNA의 평균 약 10.5 bp/회전을 반영한 교육용 모식도입니다. "
+                   "빨강=SNP, 보라=결실, 초록=삽입. 3차원 원자 구조는 아닙니다.")
     else:
         st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
 
