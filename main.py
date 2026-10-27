@@ -20,12 +20,20 @@ bca_page = st.Page(
     icon="🧪"
 )
 
+# PCR 페이지 추가
+pcr_page = st.Page(
+    "pages/3_PCR.py",
+    title="PCR 프라이머 분석",
+    icon="🔬"
+)
+
 # 페이지 이동 메뉴 만들기
 pg = st.navigation(
     {
         "BioLab Analyzer": [
             dna_page,
-            bca_page
+            bca_page,
+            pcr_page
         ]
     }
 )
