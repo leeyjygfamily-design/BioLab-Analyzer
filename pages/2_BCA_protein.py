@@ -229,11 +229,3 @@ if "bca_result" in st.session_state:
     if any(s["측정 횟수"] == 1 for s in standards):
         st.info("일부 표준용액은 1회만 측정되어 표준편차·CV를 계산할 수 없습니다.")
     st.caption("이 결과는 교육용 데이터 분석입니다. 실제 실험의 정량 가능 범위, 시약 간섭, 블랭크 처리 및 검량선 검증은 별도로 확인해야 합니다.")
-
-st.divider()
-# multipage 구성에서 main.py가 진입점일 때만 정상 동작합니다.
-if st.button("← 홈으로"):
-    try:
-        st.switch_page("main.py")
-    except Exception:
-        st.error("홈 페이지를 찾지 못했습니다. Streamlit을 'streamlit run main.py'로 실행했는지 확인해주세요.")
