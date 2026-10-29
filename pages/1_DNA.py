@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import requests
@@ -39,10 +38,6 @@ def clean_dna(seq):
     return "".join(seq.upper().split())
 
 
-def base_counts(seq):
-    return {b: seq.count(b) for b in "ATGC"}
-
-
 def gc_percent(seq):
     return 100 * (seq.count("G") + seq.count("C")) / len(seq) if seq else 0
 
@@ -59,19 +54,13 @@ codon_table = {
     "GAT":"D","GAC":"D","GAA":"E","GAG":"E","GGT":"G","GGC":"G","GGA":"G","GGG":"G"
 }
 
-amino_names = {
-    "A":"Alanine","R":"Arginine","N":"Asparagine","D":"Aspartic acid","C":"Cysteine",
-    "E":"Glutamic acid","Q":"Glutamine","G":"Glycine","H":"Histidine","I":"Isoleucine",
-    "L":"Leucine","K":"Lysine","M":"Methionine","F":"Phenylalanine","P":"Proline",
-    "S":"Serine","T":"Threonine","W":"Tryptophan","Y":"Tyrosine","V":"Valine"
-}
-
-
 def translate(seq):
     return "".join(codon_table.get(seq[i:i+3], "?") for i in range(0, len(seq)-2, 3))
 
 
 def find_orfs(seq):
+    # 시작 코돈 ATG부터 종결 코돈까지 이어지는 후보 구간을 찾습니다.
+    # 현재는 입력 서열의 정방향 읽기 틀 3개만 검사합니다.
     orfs, stops = [], {"TAA", "TAG", "TGA"}
     for frame in range(3):
         for start in range(frame, len(seq)-2, 3):
@@ -88,7 +77,10 @@ def find_orfs(seq):
 
 # -------------------- 서열 정렬 / 변이 영향 분석 --------------------
 def align_variants(reference, sample):
-    """기준 DNA에서 비교 DNA와 유사한 구간을 찾아 정렬합니다(정방향)."""
+    """기준 DNA와 비교 DNA의 유사한 구간을 정렬해 치환·삽입·결실을 찾습니다.
+
+    정방향 국소 정렬이므로 서로 맞지 않는 서열의 양 끝은 비교에서 제외될 수 있습니다.
+    """
     aligner = PairwiseAligner()
     aligner.mode = "local"
     aligner.match_score = 2
@@ -347,15 +339,20 @@ if "sequence" not in st.session_state:
 
 sequence = st.session_state.sequence
 
+# -------------------- PCR 분석 페이지 연결 --------------------
+# 현재 선택한 기준 DNA 서열을 세션에 저장한 뒤 PCR 페이지로 이동합니다.
+# 세션 상태(session_state)는 같은 Streamlit 앱의 페이지 사이에서 공유됩니다.
+# PCR 페이지에서는 st.session_state.get("pcr_template")로 이 값을 읽으면 됩니다.
+if st.button("🧬 이 DNA 서열로 PCR 분석하기", use_container_width=True):
+    st.session_state["pcr_template"] = sequence
+    st.switch_page("pages/3_PCR.py")
+
 # ② 기본 분석
 st.divider()
 st.subheader("② DNA 기본 분석")
 c1, c2 = st.columns(2)
 c1.metric("DNA 길이", f"{len(sequence):,} bp")
 c2.metric("GC 함량", f"{gc_percent(sequence):.2f}%")
-counts = base_counts(sequence)
-fig = px.bar(pd.DataFrame({"염기": counts.keys(), "개수": counts.values()}), x="염기", y="개수", title="DNA 염기 조성")
-st.plotly_chart(fig, use_container_width=True)
 with st.expander("GC 함량은 무엇을 의미하나요?"):
     st.markdown("""**GC 함량(%) = (G의 개수 + C의 개수) ÷ 전체 염기 수 × 100**
 
@@ -384,24 +381,14 @@ if "orfs" in st.session_state:
         csort, cmin = st.columns(2)
         sort_method = csort.selectbox(
             "ORF 정렬 기준",
-            ["긴 길이순", "짧은 길이순", "DNA 위치순", "비교 서열 길이에 가까운 순"]
+            ["긴 길이순", "짧은 길이순", "DNA 위치순"]
         )
         min_length = cmin.number_input("최소 ORF 길이 (bp)", min_value=0, value=300, step=30)
-        target_length = None
-        if sort_method == "비교 서열 길이에 가까운 순":
-            default_target = len(st.session_state.get("variant_sample", ""))
-            target_length = st.number_input(
-                "비교 DNA 길이 (bp)", min_value=1,
-                value=max(1, default_target), step=1,
-                help="비교 DNA 길이를 입력하면 길이 차이가 작은 ORF부터 표시합니다."
-            )
         candidates = [(i, o) for i, o in enumerate(orfs) if len(o["dna"]) >= min_length]
         if sort_method == "긴 길이순":
             candidates.sort(key=lambda item: len(item[1]["dna"]), reverse=True)
         elif sort_method == "짧은 길이순":
             candidates.sort(key=lambda item: len(item[1]["dna"]))
-        elif sort_method == "비교 서열 길이에 가까운 순":
-            candidates.sort(key=lambda item: abs(len(item[1]["dna"]) - target_length))
         else:
             candidates.sort(key=lambda item: item[1]["start"])
 
@@ -428,13 +415,6 @@ if "orfs" in st.session_state:
         st.write("번역된 아미노산 서열")
         st.code(selected_orf["protein"])
 
-        options = {f"{name} ({code})": code for code, name in amino_names.items()}
-        amino_label = st.selectbox("검색할 아미노산", options)
-        code = options[amino_label]
-        positions = [i+1 for i, aa in enumerate(selected_orf["protein"]) if aa == code]
-        st.write(f"{amino_label}: {len(positions)}개")
-        if positions:
-            st.write("위치:", ", ".join(map(str, positions)))
 else:
     selected_orf = st.session_state.get("selected_orf")
 
@@ -514,8 +494,6 @@ if "variant_result" in st.session_state:
         ])
         st.write(f"정렬된 영역에서 총 {len(df)}개 변이 항목을 찾았습니다.")
         st.dataframe(df, use_container_width=True, hide_index=True)
-        counts = df["유형"].value_counts().rename_axis("유형").reset_index(name="개수")
-        st.plotly_chart(px.bar(counts, x="유형", y="개수", title="변이 유형"), use_container_width=True)
         with st.expander("변이 유형 설명: SNP / Deletion / Insertion"):
             st.markdown("""- **SNP(단일 염기 치환):** 한 위치의 염기가 다른 염기로 바뀐 경우입니다. 코돈에 따라 아미노산이 유지되거나 달라질 수 있습니다.
 - **Deletion(결실):** 기준 서열에 있던 염기가 비교 서열에서 사라진 경우입니다.
