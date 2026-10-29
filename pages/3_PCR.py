@@ -51,9 +51,19 @@ example_template = example_forward + "GACTACGATCGATGCTAGCTGATCGTAGCTAGCTACGATCGA
 with st.expander("예시 데이터 사용 방법", expanded=False):
     st.write("아래 입력창에는 가상의 테스트 데이터가 기본으로 들어 있습니다. 그대로 분석 버튼을 누르면 예상 증폭 산물을 확인할 수 있습니다.")
 
+# DNA 분석 페이지에서 전달한 서열이 있다면 PCR 입력창에 반영합니다.
+# pop()을 사용해 한 번만 반영하므로, 이후 사용자가 입력값을 수정해도 유지됩니다.
+if "pcr_template" in st.session_state:
+    st.session_state["pcr_template_input"] = st.session_state.pop("pcr_template")
+
 with st.form("pcr_analysis_form"):
-    template_input = st.text_area("표적 DNA 서열 (5′ → 3′)", value=example_template, height=140,
-                                  help="공백과 줄바꿈은 자동 제거됩니다. A/T/G/C만 지원합니다.")
+    template_input = st.text_area(
+        "표적 DNA 서열 (5′ → 3′)",
+        value=example_template,
+        key="pcr_template_input",
+        height=140,
+        help="공백과 줄바꿈은 자동 제거됩니다. A/T/G/C만 지원합니다."
+    )
     left, right = st.columns(2)
     with left:
         forward_input = st.text_input("정방향 프라이머 (5′ → 3′)", value=example_forward)
