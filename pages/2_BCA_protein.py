@@ -78,6 +78,21 @@ def parse_measurements(df, label, has_concentration=False):
             if pd.isna(dilution) or not np.isfinite(dilution) or dilution < 1:
                 raise ValueError(f"{label} {idx + 1}행의 희석배수는 1 이상이어야 합니다.")
             result["희석배수"] = float(dilution)
+            # 질량 환산은 선택 기능입니다. 세 항목을 모두 입력했을 때만 계산합니다.
+            fields = ["전체 시료 질량 (g)", "추출에 사용한 시료 질량 (g)", "회수 상등액 부피 (mL)"]
+            entries = [row.get(field, np.nan) for field in fields]
+            present = [not (pd.isna(v) or str(v).strip() == "") for v in entries]
+            if any(present) and not all(present):
+                raise ValueError(f"{label} {idx + 1}행: 전체 질량 환산을 하려면 질량 2개와 상등액 부피를 모두 입력해주세요.")
+            if all(present):
+                nums = [pd.to_numeric(v, errors="coerce") for v in entries]
+                if any(pd.isna(v) or not np.isfinite(v) or v <= 0 for v in nums):
+                    raise ValueError(f"{label} {idx + 1}행: 질량과 상등액 부피는 0보다 큰 숫자여야 합니다.")
+                if nums[1] > nums[0]:
+                    raise ValueError(f"{label} {idx + 1}행: 추출에 사용한 질량이 전체 시료 질량보다 클 수 없습니다.")
+                result.update(dict(zip(fields, map(float, nums))))
+            else:
+                result.update({field: np.nan for field in fields})
         rows.append(result)
     return rows
 
@@ -110,6 +125,18 @@ def analyze(standards_df, unknowns_df):
         measured = calculate_unknown(row["평균 흡광도"], slope, intercept)
         row["측정 시료 농도 (mg/mL)"] = measured
         row["원액 농도 (mg/mL)"] = measured * row["희석배수"]
+        # 원액 농도는 BCA 측정 전에 희석한 배수를 반영한 추출액 농도입니다.
+        # 추출된 양 = 추출액 농도 × 회수한 상등액의 전체 부피
+        # 전체 시료 환산 = 추출된 양 × (전체 시료 질량 / 추출에 사용한 질량)
+        if np.isfinite(row["회수 상등액 부피 (mL)"]):
+            protein_mg = row["원액 농도 (mg/mL)"] * row["회수 상등액 부피 (mL)"]
+            total_mg = protein_mg * (row["전체 시료 질량 (g)"] / row["추출에 사용한 시료 질량 (g)"])
+            row["추출된 단백질 양 (mg)"] = protein_mg if measured >= 0 else np.nan
+            row["전체 시료 추정 단백질 양 (mg)"] = total_mg if measured >= 0 else np.nan
+            row["전체 시료 추정 단백질 비율 (%)"] = (total_mg / (row["전체 시료 질량 (g)"] * 1000) * 100) if measured >= 0 else np.nan
+        else:
+            for field in ("추출된 단백질 양 (mg)", "전체 시료 추정 단백질 양 (mg)", "전체 시료 추정 단백질 비율 (%)"):
+                row[field] = np.nan
         warnings = []
         if measured < low or measured > high:
             warnings.append("표준곡선 농도 범위 밖(외삽)")
@@ -310,6 +337,7 @@ with st.expander("분석 방법 및 주의사항", expanded=False):
 - **CV(%):** 표준편차 ÷ 평균 × 100입니다. 평균이 0이면 계산하지 않습니다.
 - **잔차:** 실제 평균 흡광도 − 회귀식 예측 흡광도입니다. 특정 농도에서 직선과 얼마나 차이가 나는지 보여줍니다.
 - **원액 농도:** 회귀식으로 구한 측정 시료 농도 × 희석배수입니다.
+- **전체 시료 환산:** 원액 농도 × 회수 상등액 전체 부피 × (전체 시료 질량 ÷ 추출에 사용한 질량)입니다. BCA 반응액의 부피가 아닌 상등액 회수량을 사용합니다.
 - **주의:** CV 10%는 이 앱에서 사용하는 *점검용 예시 기준*이며, 실제 허용 기준은 실험법·장비·시료에 따라 다릅니다. R²가 높아도 결과의 정확성이 보장되지는 않습니다.
 - **SMBL 업로드:** 파일 구조가 자동 인식되는 경우 561~563 nm 범위의 흡광도만 선택할 수 있습니다. 측정 전 파장을 562 nm로 설정하세요.
 - **예시 데이터:** 아래 초기값은 사용 방법을 보여주기 위한 가상 데이터입니다. 실제 실험값으로 교체해주세요.
@@ -326,6 +354,8 @@ if 'bca_unknown_table' not in st.session_state:
     st.session_state.bca_unknown_table = pd.DataFrame({
         '시료명': ['미지 시료 A'], '흡광도 1': [0.30],
         '흡광도 2': [np.nan], '흡광도 3': [np.nan], '희석배수': [1.0],
+        '전체 시료 질량 (g)': [np.nan], '추출에 사용한 시료 질량 (g)': [np.nan],
+        '회수 상등액 부피 (mL)': [np.nan],
     })
 if 'bca_editor_version' not in st.session_state:
     st.session_state.bca_editor_version = 0
@@ -416,6 +446,7 @@ if uploaded:
                                 else:
                                     row['시료명'] = str(key)
                                     row['희석배수'] = float(dilution)
+                                    row.update({'전체 시료 질량 (g)': np.nan, '추출에 사용한 시료 질량 (g)': np.nan, '회수 상등액 부피 (mL)': np.nan})
                                 rows.append(row)
                             if batch_kind == '표준용액':
                                 key = 'bca_standard_table'
@@ -462,7 +493,11 @@ standard_data = st.data_editor(st.session_state.bca_standard_table, num_rows='dy
 st.session_state.bca_standard_table = standard_data.copy()
 
 st.subheader('③ 미지 시료 데이터')
-st.caption('희석하지 않은 시료는 희석배수 1을 입력하세요. 여러 시료를 행으로 추가할 수 있습니다.')
+st.caption('희석하지 않은 시료는 희석배수 1을 입력하세요. 전체 단백질 양까지 계산하려면 시료별로 질량 2개와 원심분리 후 회수한 상등액의 전체 부피를 입력하세요. (BCA 반응에 넣은 부피가 아닙니다.)')
+# 이전 버전에서 생성된 session_state 입력표에도 새 열을 추가합니다.
+for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)'):
+    if field not in st.session_state.bca_unknown_table.columns:
+        st.session_state.bca_unknown_table[field] = np.nan
 unknown_data = st.data_editor(st.session_state.bca_unknown_table, num_rows='dynamic', use_container_width=True,
                               hide_index=True, key=f"bca_unknowns_{st.session_state.bca_editor_version}")
 st.session_state.bca_unknown_table = unknown_data.copy()
@@ -560,7 +595,25 @@ if "bca_result" in st.session_state:
     concentration_fig.update_traces(marker_color=selected_colors)
     st.plotly_chart(concentration_fig, use_container_width=True)
 
-    st.subheader("⑦ 결과 자동 해석")
+    st.subheader("⑦ 전체 시료의 추정 단백질 양")
+    st.caption("회수 상등액의 전체 부피를 기준으로 계산합니다. 추출 과정의 단백질 손실은 보정하지 않았으며, 일부 시료의 결과를 전체로 환산하려면 시료가 균일하다는 가정이 필요합니다.")
+    mass_cols = ["시료명", "전체 시료 질량 (g)", "추출에 사용한 시료 질량 (g)",
+                 "회수 상등액 부피 (mL)", "추출된 단백질 양 (mg)",
+                 "전체 시료 추정 단백질 양 (mg)", "전체 시료 추정 단백질 비율 (%)"]
+    mass_rows = [u for u in unknowns if np.isfinite(u["전체 시료 추정 단백질 양 (mg)"])]
+    if mass_rows:
+        st.dataframe(table(mass_rows, mass_cols).round(4), hide_index=True, use_container_width=True)
+        mass_fig = px.bar(table(mass_rows, mass_cols), x="시료명", y="전체 시료 추정 단백질 양 (mg)",
+                          title="전체 시료별 추정 단백질 양", text_auto=".3f")
+        color_lookup = {u["시료명"]: selected_colors[i] for i, u in enumerate(unknowns)}
+        mass_fig.update_traces(marker_color=[color_lookup.get(u["시료명"], "#1769FF") for u in mass_rows])
+        st.plotly_chart(mass_fig, use_container_width=True)
+        if any("표준곡선 농도 범위 밖" in u["해석"] for u in mass_rows):
+            st.warning("일부 시료는 표준곡선 범위 밖에서 농도가 계산되었습니다. 전체 단백질 양도 신뢰하기 어려우므로 희석 후 재측정을 고려하세요.")
+    else:
+        st.info("미지 시료 입력표에 전체 질량, 추출에 사용한 질량, 회수 상등액 부피를 입력하면 계산 결과가 표시됩니다.")
+
+    st.subheader("⑧ 결과 자동 해석")
     st.write(f"표준곡선 농도 범위: **{r['min']:.3f} ~ {r['max']:.3f} mg/mL**")
     if r["r2"] < 0.99:
         st.warning("표준곡선 R²가 0.99 미만입니다. 직선 적합도와 잔차를 점검하세요. 0.99는 참고용 점검 기준입니다.")
