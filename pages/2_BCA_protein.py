@@ -3,6 +3,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import io
+import json
+import zipfile
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="BCA 단백질 정량", page_icon="🧪", layout="wide")
 
@@ -125,6 +129,146 @@ def table(rows, columns):
     return pd.DataFrame([{col: row.get(col, np.nan) for col in columns} for row in rows])
 
 
+# -------------------- SMBL 데이터 불러오기 --------------------
+# SMBL 파일의 저장 형식은 버전/측정 모드에 따라 달라질 수 있습니다.
+# 명확한 파장-흡광도 쌍이 있는 구조화 데이터만 자동 인식합니다.
+WAVELENGTH_MIN, WAVELENGTH_MAX = 561.0, 563.0
+
+
+def _number(value):
+    try:
+        v = float(str(value).strip())
+        return v if np.isfinite(v) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _field_type(name):
+    name = str(name).lower().replace(" ", "").replace("_", "")
+    if any(t in name for t in ("wavelength", "lambda", "파장", "nm")):
+        return "wavelength"
+    if any(t in name for t in ("absorbance", "absorb", "흡광도", "opticaldensity")) or name in ("abs", "a"):
+        return "absorbance"
+    return None
+
+
+def _extract_rows(rows, source):
+    """표 헤더가 파장/흡광도임을 명확히 나타낼 때만 추출."""
+    out = []
+    if not rows:
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        wave_keys = [k for k in row if _field_type(k) == "wavelength"]
+        abs_keys = [k for k in row if _field_type(k) == "absorbance"]
+        for wk in wave_keys:
+            w = _number(row[wk])
+            if w is None:
+                continue
+            for ak in abs_keys:
+                a = _number(row[ak])
+                if a is not None:
+                    out.append({"파일/데이터": source, "파장 (nm)": w, "흡광도": a})
+    return out
+
+
+def _extract_json(obj, source, depth=0):
+    if depth > 15:
+        return []
+    result = []
+    if isinstance(obj, list):
+        result.extend(_extract_rows(obj, source))
+        for value in obj:
+            if isinstance(value, (dict, list)):
+                result.extend(_extract_json(value, source, depth + 1))
+    elif isinstance(obj, dict):
+        result.extend(_extract_rows([obj], source))
+        wave_arrays = [(k, v) for k, v in obj.items() if _field_type(k) == "wavelength" and isinstance(v, list)]
+        abs_arrays = [(k, v) for k, v in obj.items() if _field_type(k) == "absorbance" and isinstance(v, list)]
+        for _, ws in wave_arrays:
+            for _, av in abs_arrays:
+                if len(ws) == len(av):
+                    result.extend(_extract_rows([{"wavelength": w, "absorbance": a} for w, a in zip(ws, av)], source))
+        for value in obj.values():
+            if isinstance(value, (dict, list)):
+                result.extend(_extract_json(value, source, depth + 1))
+    return result
+
+
+def _extract_xml(data, source):
+    root = ET.fromstring(data)
+    rows = []
+    for element in root.iter():
+        row = {k.split('}')[-1]: v for k, v in element.attrib.items()}
+        for child in element:
+            if len(child) == 0 and child.text:
+                row[child.tag.split('}')[-1]] = child.text
+        if row:
+            rows.append(row)
+    return _extract_rows(rows, source)
+
+
+def _extract_table(data, source):
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return []
+    for sep in (None, '\t', ',', ';'):
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=sep, engine='python', on_bad_lines='skip')
+            if len(df) and len(df.columns) >= 2:
+                found = _extract_rows(df.to_dict('records'), source)
+                if found:
+                    return found
+        except (ValueError, pd.errors.ParserError, UnicodeError):
+            continue
+    return []
+
+
+def _extract_file(data, name):
+    """ZIP, JSON, XML, 표 형식으로 저장된 측정 파일을 탐색합니다."""
+    if len(data) > 25 * 1024 * 1024:
+        raise ValueError('파일은 25 MB 이하만 지원합니다.')
+    parts = [(name, data)]
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        parts = []
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for item in z.infolist():
+                if item.is_dir() or item.file_size > 10 * 1024 * 1024:
+                    continue
+                if item.filename.lower().endswith(('.json', '.xml', '.csv', '.tsv', '.txt')):
+                    parts.append((f'{name} / {item.filename}', z.read(item)))
+    result = []
+    for part_name, part in parts:
+        stripped = part.lstrip()[:1]
+        try:
+            if stripped in (b'{', b'['):
+                result.extend(_extract_json(json.loads(part.decode('utf-8-sig')), part_name))
+            elif stripped == b'<':
+                result.extend(_extract_xml(part, part_name))
+            else:
+                result.extend(_extract_table(part, part_name))
+        except (ValueError, ET.ParseError, UnicodeDecodeError, RecursionError):
+            continue
+    # XML/JSON 중첩 탐색 등으로 중복 추출한 완전히 동일한 레코드를 제거
+    return pd.DataFrame(result).drop_duplicates().reset_index(drop=True) if result else pd.DataFrame(
+        columns=['파일/데이터', '파장 (nm)', '흡광도'])
+
+
+def _apply_import(df, selected, kind, row_number, measurement_col):
+    target = df.copy().reset_index(drop=True)
+    while len(target) <= row_number:
+        blank = {c: np.nan for c in target.columns}
+        if kind == '미지 시료':
+            blank.update({'시료명': f'미지 시료 {len(target) + 1}', '희석배수': 1.0})
+        else:
+            blank['단백질 농도 (mg/mL)'] = np.nan
+        target = pd.concat([target, pd.DataFrame([blank])], ignore_index=True)
+    target.loc[row_number, measurement_col] = float(selected)
+    return target
+
+
 # -------------------- 화면 --------------------
 st.title("🧪 BCA 단백질 정량 분석")
 st.write("표준곡선으로 단백질 농도를 계산하고, 반복 측정의 일관성과 결과 해석의 한계를 확인합니다.")
@@ -137,28 +281,91 @@ with st.expander("분석 방법 및 주의사항", expanded=False):
 - **잔차:** 실제 평균 흡광도 − 회귀식 예측 흡광도입니다. 특정 농도에서 직선과 얼마나 차이가 나는지 보여줍니다.
 - **원액 농도:** 회귀식으로 구한 측정 시료 농도 × 희석배수입니다.
 - **주의:** CV 10%는 이 앱에서 사용하는 *점검용 예시 기준*이며, 실제 허용 기준은 실험법·장비·시료에 따라 다릅니다. R²가 높아도 결과의 정확성이 보장되지는 않습니다.
+- **SMBL 업로드:** 파일 구조가 자동 인식되는 경우 561~563 nm 범위의 흡광도만 선택할 수 있습니다. 측정 전 파장을 562 nm로 설정하세요.
 - **예시 데이터:** 아래 초기값은 사용 방법을 보여주기 위한 가상 데이터입니다. 실제 실험값으로 교체해주세요.
 """)
 
-st.subheader("① 표준용액 데이터")
-st.caption("같은 농도에서 최대 3회 측정한 흡광도를 한 행에 입력하세요. 측정하지 않은 칸은 비워두면 됩니다.")
-standard_default = pd.DataFrame({
-    "단백질 농도 (mg/mL)": [0.0, 0.25, 0.5, 1.0, 1.5, 2.0],
-    "흡광도 1": [0.00, 0.10, 0.21, 0.41, 0.62, 0.82],
-    "흡광도 2": [np.nan] * 6,
-    "흡광도 3": [np.nan] * 6,
-})
-standard_data = st.data_editor(standard_default, num_rows="dynamic", use_container_width=True,
-                               hide_index=True, key="bca_standards")
+# 표 데이터는 session_state에 보관하여 SMBL 값 적용 후에도 편집 상태를 유지합니다.
+if 'bca_standard_table' not in st.session_state:
+    st.session_state.bca_standard_table = pd.DataFrame({
+        '단백질 농도 (mg/mL)': [0.0, 0.25, 0.5, 1.0, 1.5, 2.0],
+        '흡광도 1': [0.00, 0.10, 0.21, 0.41, 0.62, 0.82],
+        '흡광도 2': [np.nan] * 6, '흡광도 3': [np.nan] * 6,
+    })
+if 'bca_unknown_table' not in st.session_state:
+    st.session_state.bca_unknown_table = pd.DataFrame({
+        '시료명': ['미지 시료 A'], '흡광도 1': [0.30],
+        '흡광도 2': [np.nan], '흡광도 3': [np.nan], '희석배수': [1.0],
+    })
+if 'bca_editor_version' not in st.session_state:
+    st.session_state.bca_editor_version = 0
 
-st.subheader("② 미지 시료 데이터")
-st.caption("희석하지 않은 시료는 희석배수 1을 입력하세요. 여러 시료를 행으로 추가할 수 있습니다.")
-unknown_default = pd.DataFrame({
-    "시료명": ["미지 시료 A"], "흡광도 1": [0.30],
-    "흡광도 2": [np.nan], "흡광도 3": [np.nan], "희석배수": [1.0]
-})
-unknown_data = st.data_editor(unknown_default, num_rows="dynamic", use_container_width=True,
-                              hide_index=True, key="bca_unknowns")
+st.subheader('① 분광광도계 파일 불러오기 (선택)')
+st.info('BCA 측정 시 분광광도계의 파장을 **562 nm**로 설정하세요. 파일 분석에서는 **561~563 nm (562 ± 1 nm)**를 허용합니다.')
+st.caption('Vernier SpectroVis Plus 측정 파일(.smbl)을 업로드해 보세요. CSV/TSV/JSON/XML 형식도 지원합니다. 파일 형식에 따라 자동 추출이 불가능할 수 있습니다.')
+uploaded = st.file_uploader('측정 파일 업로드', type=['smbl', 'csv', 'tsv', 'json', 'xml', 'txt'], accept_multiple_files=True)
+if uploaded:
+    signature = tuple((f.name, f.size, f.getvalue()[:128]) for f in uploaded)
+    if st.session_state.get('bca_upload_signature') != signature:
+        frames, failed = [], []
+        for f in uploaded:
+            try:
+                extracted = _extract_file(f.getvalue(), f.name)
+                if extracted.empty:
+                    failed.append(f.name)
+                else:
+                    frames.append(extracted)
+            except (ValueError, OSError, zipfile.BadZipFile) as exc:
+                failed.append(f'{f.name} ({exc})')
+        st.session_state.bca_import_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        st.session_state.bca_upload_signature = signature
+        st.session_state.bca_import_failed = failed
+    for f in st.session_state.get('bca_import_failed', []):
+        st.warning(f'{f}: 파장-흡광도 데이터 구조를 자동 인식하지 못했습니다. CSV로 내보내거나 실제 SMBL 파일 구조를 확인해야 합니다.')
+    extracted = st.session_state.bca_import_data
+    if not extracted.empty:
+        valid = extracted[extracted['파장 (nm)'].between(WAVELENGTH_MIN, WAVELENGTH_MAX)].copy().reset_index(drop=True)
+        st.caption(f'파장-흡광도 쌍 {len(extracted)}개 인식 / 허용 범위(561~563 nm) {len(valid)}개')
+        if valid.empty:
+            st.error('561~563 nm 범위의 측정값이 없습니다. 측정 파장과 파일 내용을 확인하세요.')
+        else:
+            st.success(f'562 ± 1 nm 범위의 흡광도 {len(valid)}개를 찾았습니다.')
+            st.dataframe(valid, hide_index=True, use_container_width=True)
+            st.caption('서로 다른 파장이나 측정 시점의 값은 자동 평균하지 않습니다. 실제 시료에 해당하는 행을 확인해 선택하세요.')
+            with st.form('bca_import_form'):
+                choices = [f"{i+1}. {row['파일/데이터']} | {row['파장 (nm)']:.2f} nm | 흡광도 {row['흡광도']:.5f}" for i, row in valid.iterrows()]
+                chosen = st.selectbox('입력할 측정값', range(len(choices)), format_func=lambda i: choices[i])
+                target_type = st.radio('입력 대상', ['표준용액', '미지 시료'], horizontal=True)
+                current_df = st.session_state.bca_standard_table if target_type == '표준용액' else st.session_state.bca_unknown_table
+                row_index = st.number_input('입력할 행 번호 (1부터 시작)', min_value=1, max_value=100, value=1, step=1)
+                column = st.selectbox('흡광도 입력 칸', ['흡광도 1', '흡광도 2', '흡광도 3'])
+                submitted = st.form_submit_button('선택한 흡광도 입력표에 적용')
+            if submitted:
+                value = valid.iloc[chosen]['흡광도']
+                if value < 0:
+                    st.error('음수 흡광도는 현재 BCA 분석 입력 규칙에서 허용하지 않습니다.')
+                else:
+                    key = 'bca_standard_table' if target_type == '표준용액' else 'bca_unknown_table'
+                    st.session_state[key] = _apply_import(st.session_state[key], value, target_type, int(row_index)-1, column)
+                    st.session_state.bca_editor_version += 1
+                    st.session_state.pop('bca_result', None)
+                    st.rerun()
+else:
+    st.session_state.pop('bca_upload_signature', None)
+    st.session_state.pop('bca_import_data', None)
+    st.session_state.pop('bca_import_failed', None)
+
+st.subheader('② 표준용액 데이터')
+st.caption('같은 농도에서 최대 3회 측정한 흡광도를 한 행에 입력하세요. 측정하지 않은 칸은 비워두면 됩니다.')
+standard_data = st.data_editor(st.session_state.bca_standard_table, num_rows='dynamic', use_container_width=True,
+                               hide_index=True, key=f"bca_standards_{st.session_state.bca_editor_version}")
+st.session_state.bca_standard_table = standard_data.copy()
+
+st.subheader('③ 미지 시료 데이터')
+st.caption('희석하지 않은 시료는 희석배수 1을 입력하세요. 여러 시료를 행으로 추가할 수 있습니다.')
+unknown_data = st.data_editor(st.session_state.bca_unknown_table, num_rows='dynamic', use_container_width=True,
+                              hide_index=True, key=f"bca_unknowns_{st.session_state.bca_editor_version}")
+st.session_state.bca_unknown_table = unknown_data.copy()
 
 if st.button("BCA 분석하기", type="primary", use_container_width=True):
     try:
@@ -171,7 +378,7 @@ if "bca_result" in st.session_state:
     r = st.session_state.bca_result
     standards, unknowns = r["standards"], r["unknowns"]
     st.divider()
-    st.subheader("③ 분석 결과")
+    st.subheader("④ 분석 결과")
     a, b, c = st.columns(3)
     a.metric("표준곡선 R²", f"{r['r2']:.4f}")
     b.metric("표준용액 수", f"{len(standards)}개")
@@ -180,26 +387,33 @@ if "bca_result" in st.session_state:
 
     st.subheader("표준곡선과 반복 측정 오차막대")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=[s["단백질 농도 (mg/mL)"] for s in standards],
-        y=[s["평균 흡광도"] for s in standards], mode="markers",
-        name="표준용액 평균", marker=dict(size=10),
-        error_y=dict(type="data", array=[s["표준편차"] if np.isfinite(s["표준편차"]) else 0 for s in standards], visible=True),
-        hovertemplate="농도 %{x:.3f} mg/mL<br>평균 흡광도 %{y:.4f}<extra></extra>"
-    ))
-    grid = np.linspace(r["min"], r["max"], 100)
-    fig.add_trace(go.Scatter(x=grid, y=r["slope"] * grid + r["intercept"],
-                             mode="lines", name="선형 회귀선"))
-    fig.add_trace(go.Scatter(x=[u["측정 시료 농도 (mg/mL)"] for u in unknowns],
-                             y=[u["평균 흡광도"] for u in unknowns],
-                             mode="markers", name="미지 시료", marker=dict(symbol="diamond", size=10),
-                             text=[u["시료명"] for u in unknowns],
-                             hovertemplate="%{text}<br>농도 %{x:.3f} mg/mL<br>흡광도 %{y:.4f}<extra></extra>"))
+    palette = px.colors.qualitative.Safe
+    symbols = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x', 'star', 'hexagon']
+    for i, standard in enumerate(standards):
+        fig.add_trace(go.Scatter(
+            x=[standard['단백질 농도 (mg/mL)']], y=[standard['평균 흡광도']],
+            mode='markers', name=f"표준 {standard['단백질 농도 (mg/mL)']:g} mg/mL",
+            marker=dict(size=11, color=palette[i % len(palette)], symbol=symbols[i % len(symbols)]),
+            error_y=dict(type='data', array=[standard['표준편차'] if np.isfinite(standard['표준편차']) else 0], visible=True),
+            hovertemplate='농도 %{x:.3f} mg/mL<br>평균 흡광도 %{y:.4f}<extra></extra>'
+        ))
+    grid = np.linspace(r['min'], r['max'], 100)
+    fig.add_trace(go.Scatter(x=grid, y=r['slope'] * grid + r['intercept'],
+                             mode='lines', name='선형 회귀선', line=dict(color='#444444', dash='dash')))
+    for i, unknown in enumerate(unknowns):
+        fig.add_trace(go.Scatter(
+            x=[unknown['측정 시료 농도 (mg/mL)']], y=[unknown['평균 흡광도']],
+            mode='markers', name=unknown['시료명'],
+            marker=dict(symbol=symbols[(i+2) % len(symbols)], size=13,
+                        color=palette[(i + len(standards)) % len(palette)], line=dict(color='black', width=1)),
+            error_y=dict(type='data', array=[unknown['표준편차'] if np.isfinite(unknown['표준편차']) else 0], visible=True),
+            hovertemplate=f"{unknown['시료명']}<br>농도 %{{x:.3f}} mg/mL<br>흡광도 %{{y:.4f}}<extra></extra>"
+        ))
     fig.update_layout(xaxis_title="단백질 농도 (mg/mL)", yaxis_title="흡광도", height=420)
     st.plotly_chart(fig, use_container_width=True)
     st.caption("오차막대는 반복 측정의 ±1 표본 표준편차입니다. 반복 측정이 1회이면 오차막대를 표시하지 않습니다.")
 
-    st.subheader("④ 표준용액 신뢰도 분석")
+    st.subheader("⑤ 표준용액 신뢰도 분석")
     standard_cols = ["단백질 농도 (mg/mL)", "측정 횟수", "평균 흡광도", "표준편차", "CV (%)", "예측 흡광도", "잔차"]
     st.dataframe(table(standards, standard_cols).round(4), use_container_width=True, hide_index=True)
     residual_fig = px.bar(table(standards, standard_cols), x="단백질 농도 (mg/mL)", y="잔차",
@@ -207,15 +421,16 @@ if "bca_result" in st.session_state:
     residual_fig.add_hline(y=0, line_dash="dash")
     st.plotly_chart(residual_fig, use_container_width=True)
 
-    st.subheader("⑤ 미지 시료별 단백질 농도")
+    st.subheader("⑥ 미지 시료별 단백질 농도")
     unknown_cols = ["시료명", "측정 횟수", "평균 흡광도", "표준편차", "CV (%)",
                     "희석배수", "측정 시료 농도 (mg/mL)", "원액 농도 (mg/mL)", "해석"]
     st.dataframe(table(unknowns, unknown_cols).round(4), use_container_width=True, hide_index=True)
     concentration_fig = px.bar(table(unknowns, unknown_cols), x="시료명", y="원액 농도 (mg/mL)",
                                title="미지 시료별 원액 단백질 농도", text_auto=".3f")
+    concentration_fig.update_traces(marker_color=[palette[i % len(palette)] for i in range(len(unknowns))])
     st.plotly_chart(concentration_fig, use_container_width=True)
 
-    st.subheader("⑥ 결과 자동 해석")
+    st.subheader("⑦ 결과 자동 해석")
     st.write(f"표준곡선 농도 범위: **{r['min']:.3f} ~ {r['max']:.3f} mg/mL**")
     if r["r2"] < 0.99:
         st.warning("표준곡선 R²가 0.99 미만입니다. 직선 적합도와 잔차를 점검하세요. 0.99는 참고용 점검 기준입니다.")
