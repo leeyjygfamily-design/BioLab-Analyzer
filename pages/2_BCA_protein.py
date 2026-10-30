@@ -362,31 +362,68 @@ if uploaded:
             st.success(f'562 ± 1 nm 범위의 흡광도 {len(valid)}개를 찾았습니다.')
             st.dataframe(valid, hide_index=True, use_container_width=True)
             st.caption('각 데이터 세트에서 562 nm와 가장 가까운 파장 하나를 선택했습니다. 데이터 세트 이름과 실제 시료를 확인하세요.')
-            # 여러 농도의 표준용액이 하나의 SMBL에 들어 있다면 한 번에 적용합니다.
+            # 표준용액과 미지 시료를 각각 여러 개 일괄 입력할 수 있습니다.
             if '데이터 세트' in valid.columns:
-                with st.expander('SMBL 표준용액 여러 개 한 번에 입력', expanded=True):
-                    st.write('데이터 세트 이름이 실제 표준용액 농도일 때만 사용하세요.')
-                    unit = st.selectbox('데이터 세트 이름에 사용한 농도 단위',
-                                        ['µg/mL (mg/mL로 변환)', 'mg/mL (변환 없음)'])
-                    st.caption('예: 125 µg/mL → 0.125 mg/mL. 파일에는 단위가 명시되지 않아 직접 확인해야 합니다.')
-                    if st.button('데이터 세트 이름을 농도로 사용해 표준용액 표 채우기'):
-                        rows, invalid = [], []
+                with st.expander('SMBL 데이터 세트 일괄 입력', expanded=True):
+                    st.write('파일 안의 모든 데이터 세트를 표준용액 또는 미지 시료 입력표로 가져옵니다.')
+                    batch_kind = st.radio('일괄 입력 대상', ['표준용액', '미지 시료'],
+                                          horizontal=True, key='bca_batch_kind')
+                    if batch_kind == '표준용액':
+                        st.caption('데이터 세트 이름이 실제 농도인 경우에만 선택하세요. 문자 이름은 농도로 변환하지 않습니다.')
+                        unit = st.selectbox('데이터 세트 이름의 농도 단위',
+                                            ['µg/mL (mg/mL로 변환)', 'mg/mL (변환 없음)'])
+                    else:
+                        st.caption('데이터 세트 이름을 그대로 시료명으로 사용합니다. 숫자 이름도 시료명으로 사용할 수 있습니다.')
+                        dilution = st.number_input('일괄 적용할 희석배수 (이후 개별 수정 가능)',
+                                                    min_value=1.0, value=1.0, step=1.0)
+                    if st.button('모든 데이터 세트를 입력표에 적용', type='secondary'):
+                        rows = []
+                        invalid = []
+                        grouped = {}
+                        # 같은 데이터 세트 이름이 반복되면 최대 3회 반복 측정값으로 묶습니다.
                         for _, item in valid.iterrows():
-                            concentration = _number(item['데이터 세트'])
-                            if concentration is None or concentration < 0 or item['흡광도'] < 0:
-                                invalid.append(str(item['데이터 세트']))
+                            name = str(item['데이터 세트']).strip()
+                            if not name or name.lower() == 'nan':
+                                name = str(item['파일/데이터']).split('/')[-1].strip()
+                            a = float(item['흡광도'])
+                            if not np.isfinite(a) or a < 0:
+                                invalid.append(f'{name}: 음수 또는 잘못된 흡광도')
                                 continue
-                            if unit.startswith('µg'):
-                                concentration /= 1000
-                            rows.append({'단백질 농도 (mg/mL)': concentration,
-                                         '흡광도 1': float(item['흡광도']),
-                                         '흡광도 2': np.nan, '흡광도 3': np.nan})
-                        if invalid or not rows:
-                            st.error('농도로 해석할 수 없는 데이터 세트가 있습니다: ' + ', '.join(invalid))
-                        elif len({r['단백질 농도 (mg/mL)'] for r in rows}) != len(rows):
-                            st.error('서로 다른 데이터 세트가 같은 농도로 변환되었습니다. 확인해 주세요.')
+                            if batch_kind == '표준용액':
+                                conc = _number(name)
+                                if conc is None or conc < 0:
+                                    invalid.append(f'{name}: 농도 이름이 숫자가 아님')
+                                    continue
+                                if unit.startswith('µg'):
+                                    conc /= 1000
+                                key = conc
+                            else:
+                                key = name
+                            grouped.setdefault(key, []).append(a)
+                        if any(len(values) > 3 for values in grouped.values()):
+                            st.error('같은 이름으로 측정한 값이 3개를 초과합니다. 현재 입력표는 시료당 최대 3회 측정만 지원합니다.')
+                        elif invalid:
+                            st.error('일괄 입력할 수 없는 데이터가 있습니다: ' + '; '.join(invalid))
+                        elif not grouped:
+                            st.error('일괄 입력할 측정값이 없습니다.')
                         else:
-                            st.session_state.bca_standard_table = pd.DataFrame(rows).sort_values('단백질 농도 (mg/mL)').reset_index(drop=True)
+                            for key, values in grouped.items():
+                                row = {'흡광도 1': values[0],
+                                       '흡광도 2': values[1] if len(values) > 1 else np.nan,
+                                       '흡광도 3': values[2] if len(values) > 2 else np.nan}
+                                if batch_kind == '표준용액':
+                                    row['단백질 농도 (mg/mL)'] = float(key)
+                                else:
+                                    row['시료명'] = str(key)
+                                    row['희석배수'] = float(dilution)
+                                rows.append(row)
+                            if batch_kind == '표준용액':
+                                key = 'bca_standard_table'
+                                result = pd.DataFrame(rows).sort_values('단백질 농도 (mg/mL)').reset_index(drop=True)
+                            else:
+                                key = 'bca_unknown_table'
+                                result = pd.DataFrame(rows)
+                            st.session_state[key] = result
                             st.session_state.bca_editor_version += 1
                             st.session_state.pop('bca_result', None)
                             st.rerun()
@@ -405,6 +442,11 @@ if uploaded:
                 else:
                     key = 'bca_standard_table' if target_type == '표준용액' else 'bca_unknown_table'
                     st.session_state[key] = _apply_import(st.session_state[key], value, target_type, int(row_index)-1, column)
+                    if target_type == '미지 시료':
+                        item = valid.iloc[chosen]
+                        dataset_name = str(item.get('데이터 세트', '')).strip()
+                        if dataset_name and dataset_name.lower() != 'nan':
+                            st.session_state[key].loc[int(row_index)-1, '시료명'] = dataset_name
                     st.session_state.bca_editor_version += 1
                     st.session_state.pop('bca_result', None)
                     st.rerun()
