@@ -489,14 +489,20 @@ if "bca_result" in st.session_state:
     fig = go.Figure()
     palette = px.colors.qualitative.Safe
     symbols = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x', 'star', 'hexagon']
-    for i, standard in enumerate(standards):
-        fig.add_trace(go.Scatter(
-            x=[standard['단백질 농도 (mg/mL)']], y=[standard['평균 흡광도']],
-            mode='markers', name=f"표준 {standard['단백질 농도 (mg/mL)']:g} mg/mL",
-            marker=dict(size=11, color=palette[i % len(palette)], symbol=symbols[i % len(symbols)]),
-            error_y=dict(type='data', array=[standard['표준편차'] if np.isfinite(standard['표준편차']) else 0], visible=True),
-            hovertemplate='농도 %{x:.3f} mg/mL<br>평균 흡광도 %{y:.4f}<extra></extra>'
-        ))
+    # 표준용액은 모두 같은 하늘색 원으로 표시하고 범례도 하나로 묶습니다.
+    # 미지 시료만 서로 다른 색상과 모양으로 구분합니다.
+    fig.add_trace(go.Scatter(
+        x=[standard['단백질 농도 (mg/mL)'] for standard in standards],
+        y=[standard['평균 흡광도'] for standard in standards],
+        mode='markers', name='표준용액',
+        marker=dict(size=11, color='#87CEEB', symbol='circle'),
+        error_y=dict(
+            type='data',
+            array=[standard['표준편차'] if np.isfinite(standard['표준편차']) else 0 for standard in standards],
+            visible=True
+        ),
+        hovertemplate='농도 %{x:.3f} mg/mL<br>평균 흡광도 %{y:.4f}<extra>표준용액</extra>'
+    ))
     grid = np.linspace(r['min'], r['max'], 100)
     fig.add_trace(go.Scatter(x=grid, y=r['slope'] * grid + r['intercept'],
                              mode='lines', name='선형 회귀선', line=dict(color='#444444', dash='dash')))
