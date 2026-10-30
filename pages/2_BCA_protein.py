@@ -487,8 +487,32 @@ if "bca_result" in st.session_state:
 
     st.subheader("표준곡선과 반복 측정 오차막대")
     fig = go.Figure()
-    palette = px.colors.qualitative.Safe
-    symbols = ['circle', 'square', 'diamond', 'triangle-up', 'cross', 'x', 'star', 'hexagon']
+    # 미지 시료별 색상을 사용자가 직접 선택합니다. 그래프 두 곳에 동일하게 적용합니다.
+    vivid_colors = {
+        '선명한 빨강': '#F5222D',
+        '오렌지': '#FF7800',
+        '골드': '#E5AD00',
+        '초록': '#16A34A',
+        '파랑': '#1769FF',
+        '보라': '#9333EA',
+        '핫핑크': '#FF1493',
+        '진한 회색': '#374151',
+    }
+    color_names = list(vivid_colors)
+    st.markdown('**미지 시료 그래프 색상 선택**')
+    st.caption('각 시료의 색상을 선택하면 표준곡선과 농도 비교 그래프에 동시에 반영됩니다.')
+    selected_colors = []
+    color_cols = st.columns(min(3, max(1, len(unknowns))))
+    for i, unknown in enumerate(unknowns):
+        with color_cols[i % len(color_cols)]:
+            selected_name = st.selectbox(
+                f"{unknown['시료명']} 색상",
+                options=color_names,
+                index=i % len(color_names),
+                key=f"bca_color_{i}_{unknown['시료명']}",
+            )
+            selected_colors.append(vivid_colors[selected_name])
+    symbols = ['diamond', 'triangle-up', 'square', 'cross', 'star', 'hexagon', 'x', 'pentagon']
     # 표준용액은 모두 같은 하늘색 원으로 표시하고 범례도 하나로 묶습니다.
     # 미지 시료만 서로 다른 색상과 모양으로 구분합니다.
     fig.add_trace(go.Scatter(
@@ -511,7 +535,7 @@ if "bca_result" in st.session_state:
             x=[unknown['측정 시료 농도 (mg/mL)']], y=[unknown['평균 흡광도']],
             mode='markers', name=unknown['시료명'],
             marker=dict(symbol=symbols[(i+2) % len(symbols)], size=13,
-                        color=palette[(i + len(standards)) % len(palette)], line=dict(color='black', width=1)),
+                        color=selected_colors[i], line=dict(color='black', width=1)),
             error_y=dict(type='data', array=[unknown['표준편차'] if np.isfinite(unknown['표준편차']) else 0], visible=True),
             hovertemplate=f"{unknown['시료명']}<br>농도 %{{x:.3f}} mg/mL<br>흡광도 %{{y:.4f}}<extra></extra>"
         ))
@@ -533,7 +557,7 @@ if "bca_result" in st.session_state:
     st.dataframe(table(unknowns, unknown_cols).round(4), use_container_width=True, hide_index=True)
     concentration_fig = px.bar(table(unknowns, unknown_cols), x="시료명", y="원액 농도 (mg/mL)",
                                title="미지 시료별 원액 단백질 농도", text_auto=".3f")
-    concentration_fig.update_traces(marker_color=[palette[i % len(palette)] for i in range(len(unknowns))])
+    concentration_fig.update_traces(marker_color=selected_colors)
     st.plotly_chart(concentration_fig, use_container_width=True)
 
     st.subheader("⑦ 결과 자동 해석")
