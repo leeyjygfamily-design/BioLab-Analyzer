@@ -600,7 +600,10 @@ if "bca_result" in st.session_state:
     mass_cols = ["시료명", "전체 시료 질량 (g)", "추출에 사용한 시료 질량 (g)",
                  "회수 상등액 부피 (mL)", "추출된 단백질 양 (mg)",
                  "전체 시료 추정 단백질 양 (mg)", "전체 시료 추정 단백질 비율 (%)"]
-    mass_rows = [u for u in unknowns if np.isfinite(u["전체 시료 추정 단백질 양 (mg)"])]
+    mass_rows = [
+    u for u in unknowns
+    if np.isfinite(u.get("전체 시료 추정 단백질 양 (mg)", np.nan))
+]
     if mass_rows:
         st.dataframe(table(mass_rows, mass_cols).round(4), hide_index=True, use_container_width=True)
         mass_fig = px.bar(table(mass_rows, mass_cols), x="시료명", y="전체 시료 추정 단백질 양 (mg)",
