@@ -197,7 +197,37 @@ def _extract_json(obj, source, depth=0):
 
 
 def _extract_xml(data, source):
+    """Vernier SMBL의 DataSet별 파장/흡광도 열을 대응시켜 읽습니다."""
     root = ET.fromstring(data)
+    result = []
+    for dataset in root.findall('.//DataSet'):
+        dataset_name = (dataset.findtext('DataSetName') or '이름 없는 데이터').strip()
+        wave_values, absorb_values = None, None
+        for column in dataset.findall('.//DataColumn'):
+            kind = _field_type(column.findtext('DataObjectName') or '')
+            raw = (column.findtext('ColumnCells') or '').strip()
+            if not raw:
+                continue
+            try:
+                values = [float(v) for v in raw.split()]
+            except ValueError:
+                continue
+            if kind == 'wavelength':
+                wave_values = values
+            elif kind == 'absorbance':
+                absorb_values = values
+        if wave_values is None or absorb_values is None or len(wave_values) != len(absorb_values):
+            continue
+        # 각 DataSet은 하나의 측정 스펙트럼이므로 가장 가까운 파장 하나만 선택합니다.
+        candidates = [(abs(w - 562.0), w, a) for w, a in zip(wave_values, absorb_values)
+                      if np.isfinite(w) and np.isfinite(a) and WAVELENGTH_MIN <= w <= WAVELENGTH_MAX]
+        if candidates:
+            _, wavelength, absorbance = min(candidates, key=lambda v: v[0])
+            result.append({'파일/데이터': source, '데이터 세트': dataset_name,
+                           '파장 (nm)': wavelength, '흡광도': absorbance})
+    if result:
+        return result
+    # 다른 XML 파일에서는 기존의 행 기반 인식 방식을 사용합니다.
     rows = []
     for element in root.iter():
         row = {k.split('}')[-1]: v for k, v in element.attrib.items()}
@@ -331,7 +361,35 @@ if uploaded:
         else:
             st.success(f'562 ± 1 nm 범위의 흡광도 {len(valid)}개를 찾았습니다.')
             st.dataframe(valid, hide_index=True, use_container_width=True)
-            st.caption('서로 다른 파장이나 측정 시점의 값은 자동 평균하지 않습니다. 실제 시료에 해당하는 행을 확인해 선택하세요.')
+            st.caption('각 데이터 세트에서 562 nm와 가장 가까운 파장 하나를 선택했습니다. 데이터 세트 이름과 실제 시료를 확인하세요.')
+            # 여러 농도의 표준용액이 하나의 SMBL에 들어 있다면 한 번에 적용합니다.
+            if '데이터 세트' in valid.columns:
+                with st.expander('SMBL 표준용액 여러 개 한 번에 입력', expanded=True):
+                    st.write('데이터 세트 이름이 실제 표준용액 농도일 때만 사용하세요.')
+                    unit = st.selectbox('데이터 세트 이름에 사용한 농도 단위',
+                                        ['µg/mL (mg/mL로 변환)', 'mg/mL (변환 없음)'])
+                    st.caption('예: 125 µg/mL → 0.125 mg/mL. 파일에는 단위가 명시되지 않아 직접 확인해야 합니다.')
+                    if st.button('데이터 세트 이름을 농도로 사용해 표준용액 표 채우기'):
+                        rows, invalid = [], []
+                        for _, item in valid.iterrows():
+                            concentration = _number(item['데이터 세트'])
+                            if concentration is None or concentration < 0 or item['흡광도'] < 0:
+                                invalid.append(str(item['데이터 세트']))
+                                continue
+                            if unit.startswith('µg'):
+                                concentration /= 1000
+                            rows.append({'단백질 농도 (mg/mL)': concentration,
+                                         '흡광도 1': float(item['흡광도']),
+                                         '흡광도 2': np.nan, '흡광도 3': np.nan})
+                        if invalid or not rows:
+                            st.error('농도로 해석할 수 없는 데이터 세트가 있습니다: ' + ', '.join(invalid))
+                        elif len({r['단백질 농도 (mg/mL)'] for r in rows}) != len(rows):
+                            st.error('서로 다른 데이터 세트가 같은 농도로 변환되었습니다. 확인해 주세요.')
+                        else:
+                            st.session_state.bca_standard_table = pd.DataFrame(rows).sort_values('단백질 농도 (mg/mL)').reset_index(drop=True)
+                            st.session_state.bca_editor_version += 1
+                            st.session_state.pop('bca_result', None)
+                            st.rerun()
             with st.form('bca_import_form'):
                 choices = [f"{i+1}. {row['파일/데이터']} | {row['파장 (nm)']:.2f} nm | 흡광도 {row['흡광도']:.5f}" for i, row in valid.iterrows()]
                 chosen = st.selectbox('입력할 측정값', range(len(choices)), format_func=lambda i: choices[i])
