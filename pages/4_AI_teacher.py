@@ -105,7 +105,7 @@ if "bio_teacher_messages" not in st.session_state:
 
 with st.sidebar:
     st.subheader("AI 생명공학교사 설정")
-    model_name = st.text_input("Gemini 모델 ID", value="gemini-2.5-flash", key="bio_teacher_model")
+    model_name = st.text_input("Gemini 모델 ID", value="gemini-3.8-flash", key="bio_teacher_model")
     explanation_level = st.selectbox("설명 수준", ["고등학생", "기초", "심화"], key="bio_teacher_level")
     if st.button("AI 대화 기록 지우기", key="bio_teacher_clear"):
         st.session_state.bio_teacher_messages = []
