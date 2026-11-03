@@ -177,9 +177,10 @@ PCR/DNA 해석에서는 예측과 실험적 검증을 구분하라.
                 answer = response.text or "답변을 생성하지 못했습니다. 질문을 바꿔 다시 시도해 주세요."
                 st.markdown(answer)
                 st.session_state.bio_teacher_messages.append({"role": "assistant", "content": answer})
-            except Exception as exc:
-                st.error("Gemini API 호출에 실패했습니다. API 키, 모델 ID, 할당량 및 Streamlit 로그를 확인하세요.")
-                st.caption(f"오류 종류: {type(exc).__name__}")
+           except Exception as exc:
+                st.error("Gemini API 호출에 실패했습니다.")
+                st.code(f"{type(exc).__name__}: {str(exc)}")
+                st.session_state.bio_teacher_messages.pop()
                 # 실패한 질문은 대화 기록에서 제거해 다음 요청에 중복 전달되지 않게 합니다.
                 st.session_state.bio_teacher_messages.pop()
 
