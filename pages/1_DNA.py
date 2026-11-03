@@ -585,7 +585,43 @@ st.subheader("⑤ AI 생명공학교사 연동")
 st.write("현재 DNA 분석 결과를 저장한 뒤 AI 생명공학교사에게 질문할 수 있습니다.")
 st.caption("선택한 분석 결과는 이 Streamlit 세션에 저장됩니다. AI 페이지에서 선택하면 Gemini API로 전송됩니다.")
 
-if st.button("현재 DNA 분석 결과를 AI에게 전달하기", use_container_width=True):
+# 프라이머 검토 등에 필요한 실제 염기서열 구간을 선택해 전달합니다.
+st.markdown("**AI에 포함할 실제 DNA 염기서열 구간**")
+st.caption("좌표는 현재 기준 DNA의 1-based 위치입니다. 선택 구간의 A/T/G/C 배열을 AI에 전달합니다.")
+include_region = st.checkbox("선택 구간의 염기서열 포함", value=True, key="dna_ai_include_region")
+max_region_bp = 4000
+region_start_default = 1
+region_end_default = min(len(sequence), 1200)
+if "dna_ai_sequence_identity" not in st.session_state or st.session_state.dna_ai_sequence_identity != sequence:
+    st.session_state.dna_ai_sequence_identity = sequence
+    st.session_state.dna_ai_region_start = region_start_default
+    st.session_state.dna_ai_region_end = region_end_default
+
+region_col1, region_col2 = st.columns(2)
+with region_col1:
+    region_start = st.number_input(
+        "시작 위치 (bp)", min_value=1, max_value=len(sequence),
+        step=1, key="dna_ai_region_start", disabled=not include_region,
+    )
+with region_col2:
+    region_end = st.number_input(
+        "종료 위치 (bp)", min_value=1, max_value=len(sequence),
+        step=1, key="dna_ai_region_end", disabled=not include_region,
+    )
+region_valid = (not include_region or
+                (region_start <= region_end and region_end - region_start + 1 <= max_region_bp))
+if include_region:
+    if region_start > region_end:
+        st.error("시작 위치는 종료 위치보다 작거나 같아야 합니다.")
+    elif region_end - region_start + 1 > max_region_bp:
+        st.error(f"한 번에 전달할 수 있는 실제 염기서열은 최대 {max_region_bp:,} bp입니다.")
+    else:
+        st.caption(f"전달할 구간: {region_start:,}–{region_end:,} bp "
+                   f"({region_end - region_start + 1:,} bp)")
+        with st.expander("AI에 전달할 실제 염기서열 미리보기"):
+            st.code(sequence[region_start - 1:region_end], language="text")
+
+if st.button("현재 DNA 분석 결과를 AI에게 전달하기", use_container_width=True, disabled=not region_valid):
     dna_result = {
         "데이터 출처": st.session_state.get("dna_record", {"유형": "현재 선택한 DNA 서열"}),
         "DNA 기본 분석": {
@@ -655,6 +691,17 @@ if st.button("현재 DNA 분석 결과를 AI에게 전달하기", use_container_
             }
         elif limitation:
             dna_result["단백질 영향 분석 제한"] = limitation
+
+    if include_region:
+        selected_sequence = sequence[region_start - 1:region_end]
+        dna_result["AI용 실제 DNA 구간"] = {
+            "좌표_기준": "현재 기준 DNA, 1-based, 시작과 끝 포함, 정방향 5′→3′",
+            "시작_bp": int(region_start),
+            "끝_bp": int(region_end),
+            "길이_bp": len(selected_sequence),
+            "실제_염기서열_5to3": selected_sequence,
+            "설명": "이 구간에 대해서만 실제 염기서열이 제공되었습니다. 다른 위치의 염기를 추측하지 마세요.",
+        }
 
     st.session_state["dna_result"] = dna_result
     st.success("DNA 분석 결과를 저장했습니다. AI 생명공학교사 페이지에서 확인할 수 있습니다.")
