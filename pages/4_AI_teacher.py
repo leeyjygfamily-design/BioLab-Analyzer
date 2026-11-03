@@ -1,4 +1,3 @@
-
 """BioLab Analyzer - Gemini 기반 AI 생명공학교사.
 
 설치: pip install google-genai
@@ -178,10 +177,18 @@ PCR/DNA 해석에서는 예측과 실험적 검증을 구분하라.
                 st.markdown(answer)
                 st.session_state.bio_teacher_messages.append({"role": "assistant", "content": answer})
             except Exception as exc:
-                st.error("Gemini API 호출에 실패했습니다.")
-                st.code(f"{type(exc).__name__}: {str(exc)}")
-                st.session_state.bio_teacher_messages.pop()
-                # 실패한 질문은 대화 기록에서 제거해 다음 요청에 중복 전달되지 않게 합니다.
-                st.session_state.bio_teacher_messages.pop()
+                st.error("Gemini API 호출에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+                error_code = getattr(exc, "code", None)
+                if error_code == 503:
+                    st.info("Gemini 서버가 일시적으로 혼잡합니다. 잠시 후 다시 질문해 주세요.")
+                elif error_code == 429:
+                    st.info("API 요청 한도에 도달했을 수 있습니다. 할당량을 확인해 주세요.")
+                elif error_code in (401, 403, 404):
+                    st.info(f"API 설정 또는 모델 접근 오류 (HTTP {error_code})입니다. API 키와 모델 ID를 확인해 주세요.")
+                else:
+                    st.caption(f"오류 종류: {type(exc).__name__}")
+                # 실패한 질문은 기록에 남겨 재시도할 수 있게 합니다.
+                # .pop()으로 기록을 삭제하면 빈 리스트에서 IndexError가 발생할 수 있습니다.
+
 
 st.caption("AI의 설명은 학습 보조용입니다. 분석 결과의 실험적 타당성은 별도로 확인해야 합니다.")
