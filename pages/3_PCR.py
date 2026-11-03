@@ -73,6 +73,8 @@ with st.form("pcr_analysis_form"):
     analyze = st.form_submit_button("PCR 분석하기", type="primary", use_container_width=True)
 
 if analyze:
+    # 이전 분석 결과가 새 입력에 섞이지 않도록 먼저 초기화합니다.
+    st.session_state.pop("pcr_result", None)
     template = clean_sequence(template_input)
     forward = clean_sequence(forward_input)
     reverse = clean_sequence(reverse_input)
@@ -185,3 +187,65 @@ if analyze:
         st.write("이 분석은 입력된 **한 개의 DNA 서열**에서 완전 일치 결합만 찾습니다. "
                  "프라이머 이합체·헤어핀, 불일치 결합, 전체 유전체에서의 비특이적 증폭, "
                  "염 농도·반응 온도 등은 평가하지 않습니다. 따라서 실제 실험의 증폭 성공 여부를 판단할 수 없습니다.")
+
+        # AI 생명공학교사에서 읽을 수 있도록 결과를 세션에 저장합니다.
+        # 긴 표적 DNA 전체 대신 길이와 앞부분만 전달해 전송량을 줄입니다.
+        st.session_state["pcr_result"] = {
+            "analysis_type": "PCR 프라이머 분석",
+            "template": {
+                "length_bp": len(template),
+                "sequence_preview_5prime": template[:200],
+                "sequence_truncated": len(template) > 200,
+            },
+            "primers": {
+                "forward": {
+                    "sequence_5prime_to_3prime": forward,
+                    "length_nt": len(forward),
+                    "gc_percent": round(gc_percent(forward), 2),
+                    "wallace_tm_celsius": wallace_tm(forward),
+                },
+                "reverse": {
+                    "sequence_5prime_to_3prime": reverse,
+                    "length_nt": len(reverse),
+                    "gc_percent": round(gc_percent(reverse), 2),
+                    "wallace_tm_celsius": wallace_tm(reverse),
+                },
+            },
+            "binding_sites": {
+                "forward_count": len(forward_sites),
+                "reverse_count": len(reverse_sites),
+                "forward_positions_1based": [x + 1 for x in forward_sites[:100]],
+                "reverse_positions_1based": [x + 1 for x in reverse_sites[:100]],
+                "positions_truncated": len(forward_sites) > 100 or len(reverse_sites) > 100,
+            },
+            "amplicons": {
+                "count": len(amplicons),
+                "items": [
+                    {
+                        "start_1based": a["시작 위치 (1-based)"],
+                        "end_1based": a["끝 위치 (1-based)"],
+                        "length_bp": a["예상 길이 (bp)"],
+                    }
+                    for a in amplicons[:100]
+                ],
+                "items_truncated": len(amplicons) > 100,
+            },
+            "warnings": warnings,
+            "limitations": [
+                "한 개의 입력 DNA 서열만 분석함",
+                "프라이머의 완전 일치 결합만 탐색함",
+                "Tm은 간이 Wallace 식 추정치임",
+                "프라이머 이합체, 헤어핀, 불일치 결합 및 전체 유전체 특이성을 평가하지 않음",
+                "실제 PCR 증폭 성공 여부는 판단할 수 없음",
+            ],
+        }
+
+# 분석 버튼 클릭으로 인한 재실행 후에도 AI 이동 버튼을 유지합니다.
+if "pcr_result" in st.session_state:
+    st.divider()
+    st.subheader("4. AI 생명공학교사 연동")
+    st.success("PCR 분석 결과가 AI 생명공학교사에서 사용할 수 있도록 저장되었습니다.")
+    st.caption("AI 페이지에서 PCR 프라이머 분석을 선택하고 질문하면 데이터가 Gemini에 전달됩니다.")
+    if st.button("🤖 PCR 결과를 AI 생명공학교사에게 보내기", use_container_width=True):
+        st.switch_page("pages/4_AI_teacher.py")
+
