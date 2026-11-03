@@ -177,7 +177,7 @@ PCR/DNA 해석에서는 예측과 실험적 검증을 구분하라.
                 answer = response.text or "답변을 생성하지 못했습니다. 질문을 바꿔 다시 시도해 주세요."
                 st.markdown(answer)
                 st.session_state.bio_teacher_messages.append({"role": "assistant", "content": answer})
-           except Exception as exc:
+            except Exception as exc:
                 st.error("Gemini API 호출에 실패했습니다.")
                 st.code(f"{type(exc).__name__}: {str(exc)}")
                 st.session_state.bio_teacher_messages.pop()
