@@ -128,14 +128,14 @@ def analyze(standards_df, unknowns_df):
         # 원액 농도는 BCA 측정 전에 희석한 배수를 반영한 추출액 농도입니다.
         # 추출된 양 = 추출액 농도 × 회수한 상등액의 전체 부피
         # 전체 시료 환산 = 추출된 양 × (전체 시료 질량 / 추출에 사용한 질량)
-        if np.isfinite(row["회수 상등액 부피 (mL)"]):
+        if np.isfinite(row.get("회수 상등액 부피 (mL)", np.nan)):
             protein_mg = row["원액 농도 (mg/mL)"] * row["회수 상등액 부피 (mL)"]
             total_mg = protein_mg * (row["전체 시료 질량 (g)"] / row["추출에 사용한 시료 질량 (g)"])
-            row["추출된 단백질 양 (mg)"] = protein_mg if measured >= 0 else np.nan
-            row["전체 시료 추정 단백질 양 (mg)"] = total_mg if measured >= 0 else np.nan
+            row["추출된 단백질 양 (g)"] = protein_mg / 1000 if measured >= 0 else np.nan
+            row["전체 시료 추정 단백질 양 (g)"] = total_mg / 1000 if measured >= 0 else np.nan
             row["전체 시료 추정 단백질 비율 (%)"] = (total_mg / (row["전체 시료 질량 (g)"] * 1000) * 100) if measured >= 0 else np.nan
         else:
-            for field in ("추출된 단백질 양 (mg)", "전체 시료 추정 단백질 양 (mg)", "전체 시료 추정 단백질 비율 (%)"):
+            for field in ("추출된 단백질 양 (g)", "전체 시료 추정 단백질 양 (g)", "전체 시료 추정 단백질 비율 (%)"):
                 row[field] = np.nan
         warnings = []
         if measured < low or measured > high:
@@ -283,6 +283,7 @@ def _extract_table(data, source):
     return []
 
 
+@st.cache_data(show_spinner=False, max_entries=12)
 def _extract_file(data, name):
     """ZIP, JSON, XML, 표 형식으로 저장된 측정 파일을 탐색합니다."""
     if len(data) > 25 * 1024 * 1024:
@@ -446,7 +447,10 @@ if uploaded:
                                 else:
                                     row['시료명'] = str(key)
                                     row['희석배수'] = float(dilution)
-                                    row.update({'전체 시료 질량 (g)': np.nan, '추출에 사용한 시료 질량 (g)': np.nan, '회수 상등액 부피 (mL)': np.nan})
+                                    previous = st.session_state.bca_unknown_table
+                                    match = previous[previous['시료명'].astype(str) == str(key)] if '시료명' in previous.columns else pd.DataFrame()
+                                    for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)'):
+                                        row[field] = match.iloc[0].get(field, np.nan) if not match.empty else np.nan
                                 rows.append(row)
                             if batch_kind == '표준용액':
                                 key = 'bca_standard_table'
@@ -486,28 +490,89 @@ else:
     st.session_state.pop('bca_import_data', None)
     st.session_state.pop('bca_import_failed', None)
 
-st.subheader('② 표준용액 데이터')
-st.caption('같은 농도에서 최대 3회 측정한 흡광도를 한 행에 입력하세요. 측정하지 않은 칸은 비워두면 됩니다.')
-standard_data = st.data_editor(st.session_state.bca_standard_table, num_rows='dynamic', use_container_width=True,
-                               hide_index=True, key=f"bca_standards_{st.session_state.bca_editor_version}")
-st.session_state.bca_standard_table = standard_data.copy()
+# 고정 열 너비를 지정하여 입력 도중 표의 세로 구분선이 움직이지 않도록 합니다.
+STANDARD_WIDTHS = {
+    '단백질 농도 (mg/mL)': st.column_config.NumberColumn('단백질 농도 (mg/mL)', width=180),
+    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width=125, format='%.6f') for i in range(1, 4)}
+}
+UNKNOWN_WIDTHS = {
+    '시료명': st.column_config.TextColumn('시료명', width=165),
+    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width=125, format='%.6f') for i in range(1, 4)},
+    '희석배수': st.column_config.NumberColumn('희석배수', width=110),
+    '전체 시료 질량 (g)': st.column_config.NumberColumn('전체 시료 질량 (g)', width=165),
+    '추출에 사용한 시료 질량 (g)': st.column_config.NumberColumn('추출에 사용한 시료 질량 (g)', width=215),
+    '회수 상등액 부피 (mL)': st.column_config.NumberColumn('회수 상등액 부피 (mL)', width=195),
+}
 
-st.subheader('③ 미지 시료 데이터')
-st.caption('희석하지 않은 시료는 희석배수 1을 입력하세요. 전체 단백질 양까지 계산하려면 시료별로 질량 2개와 원심분리 후 회수한 상등액의 전체 부피를 입력하세요. (BCA 반응에 넣은 부피가 아닙니다.)')
-# 이전 버전에서 생성된 session_state 입력표에도 새 열을 추가합니다.
+# 이전 버전의 표에도 필요한 열을 보완합니다.
 for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)'):
     if field not in st.session_state.bca_unknown_table.columns:
         st.session_state.bca_unknown_table[field] = np.nan
-unknown_data = st.data_editor(st.session_state.bca_unknown_table, num_rows='dynamic', use_container_width=True,
-                              hide_index=True, key=f"bca_unknowns_{st.session_state.bca_editor_version}")
-st.session_state.bca_unknown_table = unknown_data.copy()
 
-if st.button("BCA 분석하기", type="primary", use_container_width=True):
-    try:
-        st.session_state.bca_result = analyze(standard_data, unknown_data)
-    except (ValueError, TypeError, np.linalg.LinAlgError) as exc:
-        st.session_state.pop("bca_result", None)
-        st.error(str(exc))
+st.subheader('② 표준용액 및 ③ 미지 시료 데이터')
+st.caption('입력 중 다른 칸을 눌러도 값이 초기화되지 않도록 두 표를 하나의 입력 폼으로 묶었습니다. 편집을 마치면 아래 저장/분석 버튼을 누르세요.')
+with st.form(key=f"bca_tables_form_{st.session_state.bca_editor_version}", clear_on_submit=False):
+    st.markdown('**표준용액 데이터**')
+    standard_data = st.data_editor(
+        st.session_state.bca_standard_table, num_rows='dynamic',
+        use_container_width=True, hide_index=True,
+        column_config=STANDARD_WIDTHS, key=f"bca_standards_{st.session_state.bca_editor_version}")
+    st.markdown('**미지 시료 데이터**')
+    st.caption('전체 질량 환산에는 시료별 질량 2개와 원심분리 후 회수한 상등액 전체 부피(mL)를 입력합니다.')
+    unknown_data = st.data_editor(
+        st.session_state.bca_unknown_table, num_rows='dynamic',
+        use_container_width=True, hide_index=True,
+        column_config=UNKNOWN_WIDTHS, key=f"bca_unknowns_{st.session_state.bca_editor_version}")
+    left, right = st.columns(2)
+    with left:
+        save_clicked = st.form_submit_button('입력값 저장', use_container_width=True)
+    with right:
+        analyze_clicked = st.form_submit_button('입력값 저장 및 BCA 분석하기', type='primary', use_container_width=True)
+
+if save_clicked or analyze_clicked:
+    st.session_state.bca_standard_table = standard_data.copy()
+    st.session_state.bca_unknown_table = unknown_data.copy()
+    if analyze_clicked:
+        try:
+            st.session_state.bca_result = analyze(standard_data, unknown_data)
+        except (ValueError, TypeError, np.linalg.LinAlgError) as exc:
+            st.session_state.pop("bca_result", None)
+            st.error(str(exc))
+    else:
+        st.success('입력값을 현재 세션에 저장했습니다.')
+
+# 브라우저가 페이지를 완전히 다시 로드하면 session_state가 초기화될 수 있습니다.
+# CSV 두 개를 ZIP으로 백업하고 다시 불러오는 기능을 제공합니다.
+st.subheader('입력 데이터 백업 및 복원')
+backup_buf = io.BytesIO()
+with zipfile.ZipFile(backup_buf, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+    archive.writestr('standards.csv', st.session_state.bca_standard_table.to_csv(index=False, encoding='utf-8-sig'))
+    archive.writestr('unknowns.csv', st.session_state.bca_unknown_table.to_csv(index=False, encoding='utf-8-sig'))
+st.download_button('입력표 ZIP 백업 다운로드', data=backup_buf.getvalue(),
+                   file_name='BCA_input_backup.zip', mime='application/zip')
+with st.expander('백업 ZIP 파일로 입력표 복원'):
+    backup_file = st.file_uploader('이전에 저장한 BCA_input_backup.zip', type=['zip'], key='bca_backup_file')
+    if st.button('백업 복원', disabled=backup_file is None):
+        try:
+            with zipfile.ZipFile(io.BytesIO(backup_file.getvalue())) as archive:
+                if not {'standards.csv', 'unknowns.csv'}.issubset(set(archive.namelist())):
+                    raise ValueError('standards.csv와 unknowns.csv가 모두 필요합니다.')
+                restored_std = pd.read_csv(io.BytesIO(archive.read('standards.csv')))
+                restored_unk = pd.read_csv(io.BytesIO(archive.read('unknowns.csv')))
+            required_std = {'단백질 농도 (mg/mL)', '흡광도 1', '흡광도 2', '흡광도 3'}
+            required_unk = {'시료명', '흡광도 1', '흡광도 2', '흡광도 3', '희석배수'}
+            if not required_std.issubset(restored_std.columns) or not required_unk.issubset(restored_unk.columns):
+                raise ValueError('백업 파일의 열 구성이 올바르지 않습니다.')
+            for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)'):
+                if field not in restored_unk.columns:
+                    restored_unk[field] = np.nan
+            st.session_state.bca_standard_table = restored_std
+            st.session_state.bca_unknown_table = restored_unk
+            st.session_state.bca_editor_version += 1
+            st.session_state.pop('bca_result', None)
+            st.rerun()
+        except (ValueError, OSError, zipfile.BadZipFile, pd.errors.ParserError) as exc:
+            st.error(f'백업 복원 실패: {exc}')
 
 if "bca_result" in st.session_state:
     r = st.session_state.bca_result
@@ -598,15 +663,15 @@ if "bca_result" in st.session_state:
     st.subheader("⑦ 전체 시료의 추정 단백질 양")
     st.caption("회수 상등액의 전체 부피를 기준으로 계산합니다. 추출 과정의 단백질 손실은 보정하지 않았으며, 일부 시료의 결과를 전체로 환산하려면 시료가 균일하다는 가정이 필요합니다.")
     mass_cols = ["시료명", "전체 시료 질량 (g)", "추출에 사용한 시료 질량 (g)",
-                 "회수 상등액 부피 (mL)", "추출된 단백질 양 (mg)",
-                 "전체 시료 추정 단백질 양 (mg)", "전체 시료 추정 단백질 비율 (%)"]
+                 "회수 상등액 부피 (mL)", "추출된 단백질 양 (g)",
+                 "전체 시료 추정 단백질 양 (g)", "전체 시료 추정 단백질 비율 (%)"]
     mass_rows = [
     u for u in unknowns
-    if np.isfinite(u.get("전체 시료 추정 단백질 양 (mg)", np.nan))
+    if np.isfinite(u.get("전체 시료 추정 단백질 양 (g)", np.nan))
 ]
     if mass_rows:
         st.dataframe(table(mass_rows, mass_cols).round(4), hide_index=True, use_container_width=True)
-        mass_fig = px.bar(table(mass_rows, mass_cols), x="시료명", y="전체 시료 추정 단백질 양 (mg)",
+        mass_fig = px.bar(table(mass_rows, mass_cols), x="시료명", y="전체 시료 추정 단백질 양 (g)",
                           title="전체 시료별 추정 단백질 양", text_auto=".3f")
         color_lookup = {u["시료명"]: selected_colors[i] for i, u in enumerate(unknowns)}
         mass_fig.update_traces(marker_color=[color_lookup.get(u["시료명"], "#1769FF") for u in mass_rows])
