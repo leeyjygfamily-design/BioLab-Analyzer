@@ -517,7 +517,8 @@ if "variant_result" in st.session_state:
                     "전체 변이 목록은 위 표에서 확인할 수 있습니다.")
         fig = dna_variant_figure(sequence,left,right,variants)
         st.plotly_chart(fig,use_container_width=True,
-                        config={"scrollZoom":True,"displayModeBar":True})
+                        config={"scrollZoom": True, "displayModeBar": True,
+                                 "modeBarButtonsToRemove": ["autoScale2d"]})
         st.caption("하나의 그래프에서 가로·세로를 함께 확대/축소합니다. B형 DNA의 평균 약 10.5 bp/회전을 반영한 교육용 모식도입니다. "
                    "빨강=SNP, 보라=결실, 초록=삽입. 3차원 원자 구조는 아닙니다.")
     else:
