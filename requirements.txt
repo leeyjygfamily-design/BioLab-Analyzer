@@ -1,4 +1,4 @@
-plotly
-requests
-biopython
-google-genai
+plotly   # 데이터 분석 결과를 그래프로 시각화하는 라이브러리
+requests   # NCBI 등 외부 API에 HTTP 요청을 보내고 데이터를 받아오는 라이브러리
+biopython    # DNA 서열 분석, 서열 정렬 등 생물정보학 기능을 제공하는 라이브러리
+google-genai   # Google Gemini AI 모델과 연동하여 분석 결과를 해석하는 라이브러리
