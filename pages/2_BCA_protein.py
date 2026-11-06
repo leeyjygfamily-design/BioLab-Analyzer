@@ -695,3 +695,16 @@ if "bca_result" in st.session_state:
     if any(s["측정 횟수"] == 1 for s in standards):
         st.info("일부 표준용액은 1회만 측정되어 표준편차·CV를 계산할 수 없습니다.")
     st.caption("이 결과는 교육용 데이터 분석입니다. 실제 실험의 정량 가능 범위, 시약 간섭, 블랭크 처리 및 검량선 검증은 별도로 확인해야 합니다.")
+
+
+    # -------------------- AI 생명공학교사 연결 --------------------
+    # BCA 분석을 완료한 경우에만 버튼이 표시됩니다.
+    st.divider()
+    st.subheader("⑨ AI 생명공학교사 연동")
+    st.write("현재 BCA 분석 결과를 AI 생명공학교사 페이지에서 해석할 수 있습니다.")
+    st.caption("분석 결과는 현재 Streamlit 세션에 보관되며, AI 페이지에서 해당 데이터를 선택해 질문할 때 Gemini API에 전달됩니다.")
+
+    if st.button("현재 BCA 분석 결과를 AI에게 전달하기", use_container_width=True):
+        # 위에서 계산한 결과를 AI 페이지와 공유합니다.
+        st.session_state["bca_result"] = r
+        st.switch_page("pages/4_AI_teacher.py")
